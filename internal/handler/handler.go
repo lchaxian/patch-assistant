@@ -495,6 +495,7 @@ func SaveJiraConfig(c *gin.Context) {
 	// 验证 JIRA 凭据
 	if err := jira.TestAuth(jira.Config{
 		BaseURL:  baseURL,
+		LoginURL: req.LoginURL,
 		Username: req.Username,
 		Password: req.Password,
 	}); err != nil {

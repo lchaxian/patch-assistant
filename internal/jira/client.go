@@ -12,6 +12,7 @@ import (
 // Config JIRA 登录配置
 type Config struct {
 	BaseURL  string `json:"base_url"`
+	LoginURL string `json:"login_url"`
 	Username string `json:"username"`
 	Password string `json:"password"`
 }
@@ -71,31 +72,38 @@ type CommentField struct {
 	Author  UserField `json:"author"`
 }
 
-// TestAuth 验证 JIRA 用户名密码是否正确
+// TestAuth 通过 SSO 登录接口验证用户名密码是否正确
 func TestAuth(cfg Config) error {
-	baseURL := strings.TrimRight(cfg.BaseURL, "/")
-	url := fmt.Sprintf("%s/rest/api/2/myself", baseURL)
+	loginURL := strings.TrimRight(cfg.LoginURL, "/")
+	if loginURL == "" {
+		loginURL = "https://erp.transwarp.io/api/v1/free-authentication/authentication"
+	}
+
+	payload, _ := json.Marshal(map[string]string{
+		"username": cfg.Username,
+		"password": cfg.Password,
+	})
 
 	client := &http.Client{Timeout: 15 * time.Second}
-	req, err := http.NewRequest("GET", url, nil)
+	req, err := http.NewRequest("POST", loginURL, strings.NewReader(string(payload)))
 	if err != nil {
 		return fmt.Errorf("创建请求失败: %w", err)
 	}
-	req.SetBasicAuth(cfg.Username, cfg.Password)
-	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf("连接 JIRA 失败: %w", err)
+		return fmt.Errorf("连接 SSO 服务失败: %w", err)
 	}
 	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
 
 	if resp.StatusCode == http.StatusUnauthorized {
 		return fmt.Errorf("用户名或密码错误")
 	}
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("JIRA 返回 %d: %s", resp.StatusCode, string(body))
+		return fmt.Errorf("SSO 验证返回 %d: %s", resp.StatusCode, string(body))
 	}
 	return nil
 }
