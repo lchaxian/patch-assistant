@@ -1,0 +1,28 @@
+# 加密密钥（泄露后可解密所有存储的密码）
+encryption.key
+
+# SQLite 数据库（含加密的邮箱密码、Jira 凭据、AI API Key）
+mail-summary.db
+mail-summary.db-shm
+mail-summary.db-wal
+
+# 编译产物
+patch-assistant
+patch-assistant.exe
+dist/
+
+# 前端依赖和构建缓存
+web/node_modules/
+web/dist/
+
+# IDE
+.idea/
+.vscode/
+.claude/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
