@@ -247,7 +247,7 @@ function JiraSection() {
       const res = await jiraApi.save(form)
       setConfig(res.data)
       setForm({ username: res.data.username, password: '', base_url: res.data.base_url || 'https://jira.transwarp.io', login_url: res.data.login_url || 'https://erp.transwarp.io/api/v1/free-authentication/authentication' })
-      setSuccessMsg('Jira 配置已保存')
+      setSuccessMsg('Jira 配置已保存，凭据验证通过')
       setTimeout(() => setSuccessMsg(''), 3000)
     } catch (e) { setErrorMsg('保存失败: ' + (e.message || '未知错误')) }
     finally { setSaving(false) }
@@ -283,7 +283,7 @@ function JiraSection() {
             {config?.username && <span style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4, display: 'block' }}>当前用户：{config.username}，如不修改密码请留空</span>}
           </div>
           <button onClick={handleSave} disabled={saving} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '10px 24px', border: 'none', borderRadius: 'var(--radius)', background: '#6366F1', color: '#fff', cursor: saving ? 'not-allowed' : 'pointer', fontSize: 14, fontWeight: 500, opacity: saving ? 0.7 : 1, alignSelf: 'flex-start' }}>
-            {saving ? '保存中...' : '保存配置'}
+            {saving ? '验证并保存中...' : '保存配置'}
           </button>
         </div>
         {config?.username && (

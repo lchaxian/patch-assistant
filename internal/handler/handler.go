@@ -8,6 +8,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/lchaxian/patch-assistant/internal/db"
+	"github.com/lchaxian/patch-assistant/internal/jira"
 	"github.com/lchaxian/patch-assistant/internal/model"
 	"github.com/lchaxian/patch-assistant/internal/service"
 )
@@ -486,14 +487,26 @@ func SaveJiraConfig(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "参数错误: " + err.Error()})
 		return
 	}
+	baseURL := req.BaseURL
+	if baseURL == "" {
+		baseURL = "https://jira.transwarp.io"
+	}
+
+	// 验证 JIRA 凭据
+	if err := jira.TestAuth(jira.Config{
+		BaseURL:  baseURL,
+		Username: req.Username,
+		Password: req.Password,
+	}); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "JIRA 验证失败: " + err.Error()})
+		return
+	}
+
 	cfg := &model.SSOConfig{
 		Username: req.Username,
 		Password: req.Password,
-		BaseURL:  req.BaseURL,
+		BaseURL:  baseURL,
 		LoginURL: req.LoginURL,
-	}
-	if cfg.BaseURL == "" {
-		cfg.BaseURL = "https://jira.transwarp.io"
 	}
 	if err := db.SaveSSOConfig(cfg); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "保存失败: " + err.Error()})

@@ -71,6 +71,35 @@ type CommentField struct {
 	Author  UserField `json:"author"`
 }
 
+// TestAuth 验证 JIRA 用户名密码是否正确
+func TestAuth(cfg Config) error {
+	baseURL := strings.TrimRight(cfg.BaseURL, "/")
+	url := fmt.Sprintf("%s/rest/api/2/myself", baseURL)
+
+	client := &http.Client{Timeout: 15 * time.Second}
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return fmt.Errorf("创建请求失败: %w", err)
+	}
+	req.SetBasicAuth(cfg.Username, cfg.Password)
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("连接 JIRA 失败: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusUnauthorized {
+		return fmt.Errorf("用户名或密码错误")
+	}
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("JIRA 返回 %d: %s", resp.StatusCode, string(body))
+	}
+	return nil
+}
+
 // GetIssue 通过 issue key 获取 JIRA Issue 详情
 func GetIssue(cfg Config, issueKey string) (*Issue, error) {
 	baseURL := strings.TrimRight(cfg.BaseURL, "/")
