@@ -72,40 +72,41 @@ type CommentField struct {
 	Author  UserField `json:"author"`
 }
 
-// TestAuth 通过 SSO 登录接口验证用户名密码是否正确
+// TestAuth 通过 JIRA API 验证用户名密码是否正确
+// 用一个不存在的 issue key 请求，根据返回状态码判断：
+//   - 401: 用户名或密码错误（唯一表示认证失败的状态码）
+//   - 403/404: 凭据有效，403 表示无权限访问该 issue，404 表示 issue 不存在
+// JIRA 的安全策略：认证失败返回 401，认证通过后无权限或不存在返回 403/404
 func TestAuth(cfg Config) error {
-	loginURL := strings.TrimRight(cfg.LoginURL, "/")
-	if loginURL == "" {
-		loginURL = "https://erp.transwarp.io/api/v1/free-authentication/authentication"
-	}
-
-	payload, _ := json.Marshal(map[string]string{
-		"username": cfg.Username,
-		"password": cfg.Password,
-	})
+	baseURL := strings.TrimRight(cfg.BaseURL, "/")
+	url := fmt.Sprintf("%s/rest/api/2/issue/WARP-99999999", baseURL)
 
 	client := &http.Client{Timeout: 15 * time.Second}
-	req, err := http.NewRequest("POST", loginURL, strings.NewReader(string(payload)))
+	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return fmt.Errorf("创建请求失败: %w", err)
 	}
-	req.Header.Set("Content-Type", "application/json")
+	req.SetBasicAuth(cfg.Username, cfg.Password)
+	req.Header.Set("Accept", "application/json")
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf("连接 SSO 服务失败: %w", err)
+		return fmt.Errorf("连接 JIRA 失败: %w", err)
 	}
 	defer resp.Body.Close()
 
-	body, _ := io.ReadAll(resp.Body)
-
-	if resp.StatusCode == http.StatusUnauthorized {
+	switch resp.StatusCode {
+	case http.StatusUnauthorized:
+		// 401 = 唯一表示认证失败的状态码
 		return fmt.Errorf("用户名或密码错误")
+	case http.StatusNotFound, http.StatusForbidden:
+		// 404 = 认证通过，issue 不存在
+		// 403 = 认证通过，但无权限访问该 issue（JIRA 安全策略不泄露 issue 是否存在）
+		return nil
+	default:
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("JIRA 返回 %d: %s", resp.StatusCode, string(body))
 	}
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("SSO 验证返回 %d: %s", resp.StatusCode, string(body))
-	}
-	return nil
 }
 
 // GetIssue 通过 issue key 获取 JIRA Issue 详情
