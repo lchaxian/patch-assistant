@@ -218,7 +218,7 @@ function AccountsSection() {
 
 function JiraSection() {
   const [config, setConfig] = useState(null)
-  const [form, setForm] = useState({ username: '', password: '', base_url: 'https://jira.transwarp.io', login_url: 'https://erp.transwarp.io/api/v1/free-authentication/authentication' })
+  const [form, setForm] = useState({ username: '', password: '', base_url: 'https://jira.transwarp.io', login_url: 'https://erp.transwarp.io/api/v1/free-authentication/authentication', wiki_url: 'https://wiki.transwarp.io' })
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [showPassword, setShowPassword] = useState(false)
@@ -234,7 +234,7 @@ function JiraSection() {
       const cfg = res.data || {}
       setConfig(cfg)
       if (cfg.username) {
-        setForm({ username: cfg.username, password: '', base_url: cfg.base_url || 'https://jira.transwarp.io', login_url: cfg.login_url || 'https://erp.transwarp.io/api/v1/free-authentication/authentication' })
+        setForm({ username: cfg.username, password: '', base_url: cfg.base_url || 'https://jira.transwarp.io', login_url: cfg.login_url || 'https://erp.transwarp.io/api/v1/free-authentication/authentication', wiki_url: cfg.wiki_url || 'https://wiki.transwarp.io' })
       }
     } catch (e) { setErrorMsg('加载配置失败: ' + (e.message || '未知错误')) }
     finally { setLoading(false) }
@@ -246,7 +246,7 @@ function JiraSection() {
     try {
       const res = await jiraApi.save(form)
       setConfig(res.data)
-      setForm({ username: res.data.username, password: '', base_url: res.data.base_url || 'https://jira.transwarp.io', login_url: res.data.login_url || 'https://erp.transwarp.io/api/v1/free-authentication/authentication' })
+      setForm({ username: res.data.username, password: '', base_url: res.data.base_url || 'https://jira.transwarp.io', login_url: res.data.login_url || 'https://erp.transwarp.io/api/v1/free-authentication/authentication', wiki_url: res.data.wiki_url || 'https://wiki.transwarp.io' })
       setSuccessMsg('Jira 配置已保存，凭据验证通过')
       setTimeout(() => setSuccessMsg(''), 3000)
     } catch (e) { setErrorMsg('保存失败: ' + (e.message || '未知错误')) }
@@ -260,7 +260,7 @@ function JiraSection() {
 
   return (
     <div>
-      <p style={{ fontSize: 14, color: 'var(--text-secondary)', marginBottom: 16 }}>配置 Jira 登录凭据后，AI 汇总 Patch 邮件时会自动查询 WARP 工单详情。密码使用 AES-256-GCM 加密存储。</p>
+      <p style={{ fontSize: 14, color: 'var(--text-secondary)', marginBottom: 16 }}>配置 Jira/Wiki 登录凭据后，AI 汇总 Patch 邮件时会自动查询 WARP 工单详情和 Wiki 相关文档。密码使用 AES-256-GCM 加密存储。</p>
 
       {successMsg && <AlertBox kind="success" text={successMsg} onClose={() => setSuccessMsg('')} />}
       {errorMsg && <AlertBox kind="error" text={errorMsg} onClose={() => setErrorMsg('')} />}
@@ -269,7 +269,7 @@ function JiraSection() {
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
             <div><label style={labelStyle}>JIRA 地址</label><input value={form.base_url} onChange={e => setForm({ ...form, base_url: e.target.value })} placeholder="https://jira.transwarp.io" style={inputStyle} /></div>
-            <div><label style={labelStyle}>SSO 登录地址</label><input value={form.login_url} onChange={e => setForm({ ...form, login_url: e.target.value })} placeholder="https://erp.transwarp.io/..." style={inputStyle} /></div>
+            <div><label style={labelStyle}>Wiki 地址</label><input value={form.wiki_url} onChange={e => setForm({ ...form, wiki_url: e.target.value })} placeholder="https://wiki.transwarp.io" style={inputStyle} /></div>
           </div>
           <div><label style={labelStyle}>用户名</label><input value={form.username} onChange={e => setForm({ ...form, username: e.target.value })} placeholder="输入 SSO 用户名" style={inputStyle} /></div>
           <div>
@@ -288,7 +288,7 @@ function JiraSection() {
         </div>
         {config?.username && (
           <div style={{ marginTop: 20, padding: '12px 16px', background: '#F0FDF4', border: '1px solid #BBF7D0', borderRadius: 'var(--radius)', display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: '#166534' }}>
-            <CheckCircle size={16} /><span>已配置 Jira 凭据（用户：{config.username}）</span>
+            <CheckCircle size={16} /><span>已配置 Jira/Wiki 凭据（用户：{config.username}）</span>
           </div>
         )}
       </div>
@@ -330,7 +330,14 @@ function AISection() {
   const resetPrompt = () => {
     setAiPrompt(`你是一个专业的软件 Patch 分析助手。请根据以下 Patch 发布通知邮件内容，生成一份结构化的 Patch 调整摘要。
 
-如果邮件正文中包含 WARP-xxxxx 格式的工单编号，请使用 query_warp_issue 工具查询该工单在 JIRA 中的详细信息（标题、描述、状态、评论等），结合 JIRA 工单内容更准确地分析 Patch 调整的原因和影响。
+如果邮件正文中包含 WARP-xxxxx 格式的工单编号，请：
+1. 使用 query_warp_issue 工具查询该工单在 JIRA 中的详细信息（标题、描述、状态、评论等）
+2. 使用 search_wiki 工具搜索 Wiki 上与该 WARP 编号相关的文档和附件（如测试 SQL 文件、技术方案），搜索时直接传入 WARP 编号
+3. 如果 search_wiki 返回了页面结果但内容不够详细，可使用 get_wiki_page 工具获取该页面的完整正文和附件内容。传入页面的 ID 即可
+
+search_wiki 会自动获取页面正文和文本类附件（如 .sql、.txt、.properties）的内容，通常已包含足够信息。只有当内容被截断或需要更详细信息时，才需要使用 get_wiki_page。
+
+结合 JIRA 工单和 Wiki 搜索结果，更全面地分析 Patch 调整的原因和影响。
 
 请按以下格式输出：
 
@@ -347,6 +354,21 @@ function AISection() {
 
 ## 注意事项
 部署或升级时需要注意的事项
+
+## Wiki 相关信息
+列出从 Wiki 搜索到的与本次 Patch 相关的文档和附件内容摘要。如果 Wiki 附件是 SQL 脚本、properties 配置等文本内容，直接输出附件原文内容，方便验证和执行。
+
+## 测试案例
+根据 JIRA 工单描述、Wiki 文档内容（尤其是附件中的测试 SQL、配置文件等），为每个调整项生成对应的测试案例。格式如下：
+
+### 测试案例 1：[案例名称]
+- **关联 WARP 工单**：WARP-xxxxx
+- **前置条件**：测试前需要准备的环境和数据
+- **测试步骤**：
+  1. 步骤一
+  2. 步骤二
+- **预期结果**：期望的测试结果
+- **验证 SQL/脚本**：（如果 Wiki 附件中有测试 SQL，直接引用）
 
 ---
 
@@ -445,7 +467,7 @@ function AISection() {
         </div>
         <textarea value={aiPrompt} onChange={e => setAiPrompt(e.target.value)} placeholder="输入 AI 汇总时使用的提示词..."
           style={{ width: '100%', minHeight: 140, padding: '10px 12px', border: '1px solid #C7D2FE', borderRadius: 'var(--radius)', fontSize: 12, lineHeight: 1.6, color: 'var(--text)', background: '#fff', outline: 'none', resize: 'vertical', boxSinging: 'border-box', fontFamily: 'inherit' }} />
-        <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 6 }}>提示词末尾会自动拼接邮件正文。留空则使用默认提示词。</div>
+        <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 6 }}>提示词末尾会自动拼接邮件正文。留空则使用默认提示词。支持引导 AI 使用 query_warp_issue 和 search_wiki 工具查询 JIRA 工单和 Wiki 文档。</div>
       </div>
     </div>
   )

@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"log"
 	"net/http"
 	"strconv"
 	"time"
@@ -482,6 +483,7 @@ func SaveJiraConfig(c *gin.Context) {
 		Password string `json:"password" binding:"required"`
 		BaseURL  string `json:"base_url"`
 		LoginURL string `json:"login_url"`
+		WikiURL  string `json:"wiki_url"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "参数错误: " + err.Error()})
@@ -490,6 +492,10 @@ func SaveJiraConfig(c *gin.Context) {
 	baseURL := req.BaseURL
 	if baseURL == "" {
 		baseURL = "https://jira.transwarp.io"
+	}
+	wikiURL := req.WikiURL
+	if wikiURL == "" {
+		wikiURL = "https://wiki.transwarp.io"
 	}
 
 	// 验证 JIRA 凭据
@@ -507,6 +513,7 @@ func SaveJiraConfig(c *gin.Context) {
 		Password: req.Password,
 		BaseURL:  baseURL,
 		LoginURL: req.LoginURL,
+		WikiURL:  wikiURL,
 	}
 	if err := db.SaveSSOConfig(cfg); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "保存失败: " + err.Error()})
@@ -518,18 +525,102 @@ func SaveJiraConfig(c *gin.Context) {
 
 // --- AI Summarize Handler ---
 
+func GetAISummary(c *gin.Context) {
+	mailID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "无效的 ID"})
+		return
+	}
+	summary, err := db.GetAISummary(mailID)
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"data": nil})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": summary})
+}
+
+func BatchGetAISummaries(c *gin.Context) {
+	var req struct {
+		MailIDs []int64 `json:"mail_ids"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "参数错误: " + err.Error()})
+		return
+	}
+	summaries, err := db.GetAISummariesByMailIDs(req.MailIDs)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	// 转为 map[mail_id]AISummarizeResponse 格式
+	result := make(map[int64]*model.AISummarizeResponse)
+	for mailID, s := range summaries {
+		result[mailID] = &model.AISummarizeResponse{
+			MailID:    s.MailID,
+			Subject:   s.Subject,
+			Summary:   s.Summary,
+			Provider:  s.Provider,
+			Model:     s.Model,
+			JiraLinks: s.JiraLinks,
+			WikiLinks: s.WikiLinks,
+			CreatedAt: s.CreatedAt.Format("2006-01-02 15:04:05"),
+		}
+	}
+	c.JSON(http.StatusOK, gin.H{"data": result})
+}
+
 func AISummarize(c *gin.Context) {
 	var req model.AISummarizeRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "参数错误: " + err.Error()})
 		return
 	}
+
+	// 如果不是强制刷新，先尝试从缓存读取
+	if !req.Force {
+		cached, err := db.GetAISummary(req.MailID)
+		if err == nil && cached != nil {
+			// 将 AISummary 转为 AISummarizeResponse 格式返回
+			result := &model.AISummarizeResponse{
+				MailID:    cached.MailID,
+				Subject:   cached.Subject,
+				Summary:   cached.Summary,
+				Provider:  cached.Provider,
+				Model:     cached.Model,
+				JiraLinks: cached.JiraLinks,
+				WikiLinks: cached.WikiLinks,
+				CreatedAt: cached.CreatedAt.Format("2006-01-02 15:04:05"),
+			}
+			c.JSON(http.StatusOK, gin.H{"data": result, "cached": true})
+			return
+		}
+	}
+
+	// 执行 AI 汇总
 	result, err := service.SummarizePatchMail(req.MailID, req.Prompt)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"data": result})
+
+	// 持久化汇总结果
+	summary := &model.AISummary{
+		MailID:    result.MailID,
+		Subject:   result.Subject,
+		Summary:   result.Summary,
+		Provider:  result.Provider,
+		Model:     result.Model,
+		JiraLinks: result.JiraLinks,
+		WikiLinks: result.WikiLinks,
+	}
+	if saveErr := db.SaveAISummary(summary); saveErr != nil {
+		log.Printf("[WARN] 保存 AI 汇总结果失败: %v", saveErr)
+	} else {
+		// 回填 created_at 给响应
+		result.CreatedAt = summary.CreatedAt.Format("2006-01-02 15:04:05")
+	}
+
+	c.JSON(http.StatusOK, gin.H{"data": result, "cached": false})
 }
 
 // --- AI Prompt Handlers ---
@@ -539,6 +630,9 @@ func GetAIPrompt(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
+	}
+	if prompt == "" {
+		prompt = db.DefaultPatchPrompt
 	}
 	c.JSON(http.StatusOK, gin.H{"data": gin.H{"prompt": prompt}})
 }

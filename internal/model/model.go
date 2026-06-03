@@ -108,6 +108,7 @@ type AIConfig struct {
 type AISummarizeRequest struct {
 	MailID int64  `json:"mail_id" binding:"required"`
 	Prompt string `json:"prompt,omitempty"`
+	Force  bool   `json:"force,omitempty"`
 }
 
 // JiraConfig JIRA 系统配置（保留向后兼容）
@@ -127,6 +128,7 @@ type SSOConfig struct {
 	Password  string    `json:"password"`
 	BaseURL   string    `json:"base_url"`
 	LoginURL  string    `json:"login_url"`
+	WikiURL   string    `json:"wiki_url"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
@@ -137,12 +139,35 @@ type JiraLink struct {
 	URL string `json:"url"`
 }
 
+// WikiLink Wiki 文档链接
+type WikiLink struct {
+	ID    string `json:"id"`
+	Title string `json:"title"`
+	URL   string `json:"url"`
+}
+
 // AISummarizeResponse AI 汇总响应
 type AISummarizeResponse struct {
-	MailID    int64      `json:"mail_id"`
-	Subject   string     `json:"subject"`
-	Summary   string     `json:"summary"`
-	Provider  string     `json:"provider"`
-	Model     string     `json:"model"`
-	JiraLinks []JiraLink `json:"jira_links"`
+	MailID     int64      `json:"mail_id"`
+	Subject    string     `json:"subject"`
+	Summary    string     `json:"summary"`
+	Provider   string     `json:"provider"`
+	Model      string     `json:"model"`
+	JiraLinks  []JiraLink `json:"jira_links"`
+	WikiLinks  []WikiLink `json:"wiki_links"`
+	CreatedAt  string     `json:"created_at,omitempty"`
+}
+
+// AISummary AI 汇总持久化记录
+type AISummary struct {
+	ID         int64       `json:"id"`
+	MailID     int64       `json:"mail_id"`
+	Subject    string      `json:"subject"`
+	Summary    string      `json:"summary"`
+	Provider   string      `json:"provider"`
+	Model      string      `json:"model"`
+	JiraLinks  []JiraLink  `json:"jira_links"`
+	WikiLinks  []WikiLink  `json:"wiki_links"`
+	CreatedAt  time.Time   `json:"created_at"`
+	UpdatedAt  time.Time   `json:"updated_at"`
 }

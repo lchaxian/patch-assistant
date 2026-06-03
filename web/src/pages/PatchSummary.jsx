@@ -63,9 +63,30 @@ export default function PatchSummary() {
       }
       const res = await patchApi.summary(params)
       setPatches(res.data)
+      // 加载完成后，批量获取已有 AI 缓存
+      loadAICache(res.data?.patches || [])
     } catch (e) {
       setError(e.message || '加载失败')
     } finally { setLoading(false) }
+  }
+
+  const loadAICache = async (patchList) => {
+    if (!patchList || patchList.length === 0) return
+    const mailIds = patchList.map(p => p.mail_id)
+    try {
+      const res = await aiApi.batchSummaries(mailIds)
+      const cachedMap = res.data || {}
+      // 将后端返回的 map 转为前端 aiResults 格式
+      const newResults = {}
+      for (const [mailId, summary] of Object.entries(cachedMap)) {
+        if (summary) {
+          newResults[Number(mailId)] = summary
+        }
+      }
+      setAiResults(prev => ({ ...prev, ...newResults }))
+    } catch (e) {
+      console.error('加载AI缓存失败', e)
+    }
   }
 
   const handleSyncAndRefresh = async () => {
@@ -87,13 +108,15 @@ export default function PatchSummary() {
 
   const handleCloseDetail = () => { setSelectedPatch(null); setMailDetail(null) }
 
-  const handleAISummarize = async (patch) => {
-    // 已有成功的缓存结果，直接展示，不重复调用 API
-    const cached = aiResults[patch.mail_id]
-    if (cached && !cached.error) {
-      setAiResult(cached)
-      setShowAIPanel(true)
-      return
+  const handleAISummarize = async (patch, force = false) => {
+    // 已有缓存且非强制刷新，直接展示
+    if (!force) {
+      const cached = aiResults[patch.mail_id]
+      if (cached && !cached.error) {
+        setAiResult(cached)
+        setShowAIPanel(true)
+        return
+      }
     }
 
     setAiSummarizing(prev => ({ ...prev, [patch.mail_id]: true }))
@@ -101,7 +124,7 @@ export default function PatchSummary() {
     setShowAIPanel(true)
     setAiLoading(true)
     try {
-      const res = await aiApi.summarize(patch.mail_id)
+      const res = await aiApi.summarize(patch.mail_id, { force })
       const result = res.data
       setAiResults(prev => ({ ...prev, [patch.mail_id]: result }))
       setAiResult(result)
@@ -289,13 +312,21 @@ export default function PatchSummary() {
                                   <div style={{ display: 'flex', gap: 6 }}>
                                     <ActionBtn label="详情" color="var(--primary)" onClick={() => handleViewDetail(p)} />
                                     <ActionBtn
-                                      label={isAIWorking ? '分析中' : (hasAIResult ? '查看' : 'AI 分析')}
+                                      label={isAIWorking ? '分析中' : (hasAIResult && !hasAIResult.error ? '查看分析' : 'AI 分析')}
                                       color="#8B5CF6"
                                       icon={<Sparkles size={12} className={isAIWorking ? 'spin' : ''} />}
                                       disabled={isAIWorking}
                                       active={hasAIResult && !hasAIResult.error}
                                       onClick={() => handleAISummarize(p)}
                                     />
+                                    {hasAIResult && !hasAIResult.error && !isAIWorking && (
+                                      <ActionBtn
+                                        label="重新分析"
+                                        color="#F59E0B"
+                                        icon={<RefreshCw size={12} />}
+                                        onClick={() => handleAISummarize(p, true)}
+                                      />
+                                    )}
                                   </div>
                                 </td>
                               </tr>
@@ -345,6 +376,16 @@ export default function PatchSummary() {
           <div style={{ padding: '16px 24px', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: 12, background: 'linear-gradient(135deg, #F5F3FF 0%, #EEF2FF 100%)' }}>
             <Sparkles size={18} color="#7C3AED" />
             <h3 style={{ margin: 0, fontSize: 16, fontWeight: 600, color: '#5B21B6' }}>AI Patch 分析</h3>
+            {aiResult && !aiResult.error && !aiLoading && (
+              <button
+                onClick={() => { if (selectedPatch || aiResult) handleAISummarize({ mail_id: aiResult.mail_id, subject: aiResult.subject }, true) }}
+                style={{ marginLeft: 8, display: 'inline-flex', alignItems: 'center', gap: 4, padding: '4px 10px', borderRadius: 'var(--radius)', fontSize: 12, fontWeight: 500, border: '1px solid #F59E0B', background: 'transparent', color: '#B45309', cursor: 'pointer', transition: 'all 0.15s' }}
+                onMouseEnter={e => { e.target.style.background = '#F59E0B'; e.target.style.color = '#fff' }}
+                onMouseLeave={e => { e.target.style.background = 'transparent'; e.target.style.color = '#B45309' }}
+              >
+                <RefreshCw size={12} /> 重新分析
+              </button>
+            )}
             <span style={{ flex: 1 }}></span>
             <button onClick={() => setShowAIPanel(false)} style={{ padding: 4, border: 'none', background: 'none', cursor: 'pointer', color: 'var(--text-muted)' }}><X size={18} /></button>
           </div>
@@ -367,6 +408,7 @@ export default function PatchSummary() {
                   <div style={{ padding: '12px 16px', background: 'linear-gradient(135deg, #F5F3FF 0%, #EEF2FF 100%)', borderRadius: 'var(--radius-lg)', marginBottom: 16, borderLeft: '3px solid #7C3AED' }}>
                     <p style={{ margin: 0, fontSize: 13, color: '#5B21B6', fontWeight: 500 }}>{aiResult.subject}</p>
                     <p style={{ margin: '4px 0 0', fontSize: 12, color: '#8B5CF6' }}>使用 {aiResult.provider} / {aiResult.model}</p>
+                    {aiResult.created_at && <p style={{ margin: '2px 0 0', fontSize: 11, color: '#A78BFA' }}>分析时间：{new Date(aiResult.created_at).toLocaleString('zh-CN')}</p>}
                   </div>
                   {aiResult.jira_links && aiResult.jira_links.length > 0 && (
                     <div style={{ padding: '10px 16px', background: '#FFFBEB', borderRadius: 'var(--radius-lg)', marginBottom: 16, borderLeft: '3px solid #F59E0B' }}>
@@ -378,6 +420,21 @@ export default function PatchSummary() {
                             onMouseEnter={e => { e.target.style.background = '#FDE68A' }}
                             onMouseLeave={e => { e.target.style.background = '#FEF3C7' }}>
                             {link.key}
+                          </a>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  {aiResult.wiki_links && aiResult.wiki_links.length > 0 && (
+                    <div style={{ padding: '10px 16px', background: '#F0FDF4', borderRadius: 'var(--radius-lg)', marginBottom: 16, borderLeft: '3px solid #10B981' }}>
+                      <p style={{ margin: '0 0 6px', fontSize: 13, fontWeight: 600, color: '#065F46' }}>📄 Wiki 文档</p>
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                        {aiResult.wiki_links.map((link, i) => (
+                          <a key={i} href={link.url} target="_blank" rel="noopener noreferrer"
+                            style={{ display: 'inline-flex', alignItems: 'center', gap: 4, padding: '3px 10px', borderRadius: 'var(--radius)', fontSize: 12, fontWeight: 500, background: '#D1FAE5', color: '#047857', border: '1px solid #6EE7B7', textDecoration: 'none', transition: 'all 0.15s' }}
+                            onMouseEnter={e => { e.target.style.background = '#A7F3D0' }}
+                            onMouseLeave={e => { e.target.style.background = '#D1FAE5' }}>
+                            {link.title}
                           </a>
                         ))}
                       </div>
@@ -522,7 +579,14 @@ function AIConfigModal({ configs, onClose, onRefresh }) {
   const resetPrompt = () => {
     setAiPrompt(`你是一个专业的软件 Patch 分析助手。请根据以下 Patch 发布通知邮件内容，生成一份结构化的 Patch 调整摘要。
 
-如果邮件正文中包含 WARP-xxxxx 格式的工单编号，请使用 query_warp_issue 工具查询该工单在 JIRA 中的详细信息（标题、描述、状态、评论等），结合 JIRA 工单内容更准确地分析 Patch 调整的原因和影响。
+如果邮件正文中包含 WARP-xxxxx 格式的工单编号，请：
+1. 使用 query_warp_issue 工具查询该工单在 JIRA 中的详细信息（标题、描述、状态、评论等）
+2. 使用 search_wiki 工具搜索 Wiki 上与该 WARP 编号相关的文档和附件（如测试 SQL 文件、技术方案），搜索时直接传入 WARP 编号
+3. 如果 search_wiki 返回了页面结果但内容不够详细，可使用 get_wiki_page 工具获取该页面的完整正文和附件内容。传入页面的 ID 即可
+
+search_wiki 会自动获取页面正文和文本类附件（如 .sql、.txt、.properties）的内容，通常已包含足够信息。只有当内容被截断或需要更详细信息时，才需要使用 get_wiki_page。
+
+结合 JIRA 工单和 Wiki 搜索结果，更全面地分析 Patch 调整的原因和影响。
 
 请按以下格式输出：
 
@@ -539,6 +603,21 @@ function AIConfigModal({ configs, onClose, onRefresh }) {
 
 ## 注意事项
 部署或升级时需要注意的事项
+
+## Wiki 相关信息
+列出从 Wiki 搜索到的与本次 Patch 相关的文档和附件内容摘要。如果 Wiki 附件是 SQL 脚本、properties 配置等文本内容，直接输出附件原文内容，方便验证和执行。
+
+## 测试案例
+根据 JIRA 工单描述、Wiki 文档内容（尤其是附件中的测试 SQL、配置文件等），为每个调整项生成对应的测试案例。格式如下：
+
+### 测试案例 1：[案例名称]
+- **关联 WARP 工单**：WARP-xxxxx
+- **前置条件**：测试前需要准备的环境和数据
+- **测试步骤**：
+  1. 步骤一
+  2. 步骤二
+- **预期结果**：期望的测试结果
+- **验证 SQL/脚本**：（如果 Wiki 附件中有测试 SQL，直接引用）
 
 ---
 

@@ -63,9 +63,14 @@ export const aiApi = {
   updateConfig: (id, data) => request(`/ai/configs/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
   deleteConfig: (id) => request(`/ai/configs/${id}`, { method: 'DELETE' }),
   setDefault: (id) => request(`/ai/configs/${id}/default`, { method: 'PUT' }),
-  summarize: (mailId, prompt = '') => request('/ai/summarize', {
+  summarize: (mailId, { prompt = '', force = false } = {}) => request('/ai/summarize', {
     method: 'POST',
-    body: JSON.stringify({ mail_id: mailId, prompt }),
+    body: JSON.stringify({ mail_id: mailId, prompt, force }),
+  }),
+  getSummary: (mailId) => request(`/ai/summary/${mailId}`),
+  batchSummaries: (mailIds) => request('/ai/summaries/batch', {
+    method: 'POST',
+    body: JSON.stringify({ mail_ids: mailIds }),
   }),
   getPrompt: () => request('/ai/prompt'),
   savePrompt: (prompt) => request('/ai/prompt', { method: 'PUT', body: JSON.stringify({ prompt }) }),

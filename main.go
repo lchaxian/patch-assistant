@@ -117,6 +117,8 @@ func main() {
 			ai.DELETE("/configs/:id", handler.DeleteAIConfig)
 			ai.PUT("/configs/:id/default", handler.SetDefaultAIConfigHandler)
 			ai.POST("/summarize", handler.AISummarize)
+			ai.GET("/summary/:id", handler.GetAISummary)
+			ai.POST("/summaries/batch", handler.BatchGetAISummaries)
 			ai.GET("/prompt", handler.GetAIPrompt)
 			ai.PUT("/prompt", handler.SaveAIPrompt)
 		}

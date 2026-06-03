@@ -2,7 +2,9 @@ package db
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -13,6 +15,54 @@ import (
 var (
 	DB *sql.DB
 )
+
+// DefaultPatchPrompt 默认 AI 提示词
+const DefaultPatchPrompt = `你是一个专业的软件 Patch 分析助手。请根据以下 Patch 发布通知邮件内容，生成一份结构化的 Patch 调整摘要。
+
+如果邮件正文中包含 WARP-xxxxx 格式的工单编号，请：
+1. 使用 query_warp_issue 工具查询该工单在 JIRA 中的详细信息（标题、描述、状态、评论等）
+2. 使用 search_wiki 工具搜索 Wiki 上与该 WARP 编号相关的文档和附件（如测试 SQL 文件、技术方案），搜索时直接传入 WARP 编号
+3. 如果 search_wiki 返回了页面结果但内容不够详细，可使用 get_wiki_page 工具获取该页面的完整正文和附件内容。传入页面的 ID 即可
+
+search_wiki 会自动获取页面正文和文本类附件（如 .sql、.txt、.properties）的内容，通常已包含足够信息。只有当内容被截断或需要更详细信息时，才需要使用 get_wiki_page。
+
+结合 JIRA 工单和 Wiki 搜索结果，更全面地分析 Patch 调整的原因和影响。
+
+请按以下格式输出：
+
+## Patch 基本信息
+- 产品及版本
+- Patch 类型（预览/通用/定向）
+- Patch 日期
+
+## 调整内容
+列出本次 Patch 涉及的主要调整和修复内容
+
+## 影响范围
+分析本次 Patch 可能影响的模块和功能
+
+## 注意事项
+部署或升级时需要注意的事项
+
+## Wiki 相关信息
+列出从 Wiki 搜索到的与本次 Patch 相关的文档和附件内容摘要。如果 Wiki 附件是 SQL 脚本、properties 配置等文本内容，直接输出附件原文内容，方便验证和执行。
+
+## 测试案例
+根据 JIRA 工单描述、Wiki 文档内容（尤其是附件中的测试 SQL、配置文件等），为每个调整项生成对应的测试案例。格式如下：
+
+### 测试案例 1：[案例名称]
+- **关联 WARP 工单**：WARP-xxxxx
+- **前置条件**：测试前需要准备的环境和数据
+- **测试步骤**：
+  1. 步骤一
+  2. 步骤二
+- **预期结果**：期望的测试结果
+- **验证 SQL/脚本**：（如果 Wiki 附件中有测试 SQL，直接引用）
+
+---
+
+邮件内容：
+`
 
 // Init 初始化数据库
 func Init(dbPath string) error {
@@ -116,6 +166,22 @@ func createTables() error {
 		updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 	);
 
+	CREATE TABLE IF NOT EXISTS ai_summaries (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		mail_id INTEGER NOT NULL UNIQUE,
+		subject TEXT NOT NULL DEFAULT '',
+		summary TEXT NOT NULL DEFAULT '',
+		provider TEXT NOT NULL DEFAULT '',
+		model TEXT NOT NULL DEFAULT '',
+		jira_links TEXT NOT NULL DEFAULT '[]',
+		wiki_links TEXT NOT NULL DEFAULT '[]',
+		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		FOREIGN KEY (mail_id) REFERENCES mails(id) ON DELETE CASCADE
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_ai_summaries_mail_id ON ai_summaries(mail_id);
+
 	CREATE TABLE IF NOT EXISTS settings (
 		key TEXT PRIMARY KEY,
 		value TEXT NOT NULL DEFAULT '',
@@ -138,12 +204,22 @@ func migrateTablesV2() error {
 			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 		)`,
+		`ALTER TABLE sso_config ADD COLUMN wiki_url TEXT NOT NULL DEFAULT 'https://wiki.transwarp.io'`,
 	}
 	for _, stmt := range migrations {
 		if _, err := DB.Exec(stmt); err != nil {
-			return fmt.Errorf("migrate: %w", err)
+			// 忽略 "duplicate column" 错误（列已存在）
+			if !strings.Contains(err.Error(), "duplicate column") {
+				return fmt.Errorf("migrate: %w", err)
+			}
 		}
 	}
+
+	// 升级旧版 AI prompt：如果已存储的 prompt 不包含"测试案例"章节，说明是旧版，用默认 prompt 覆盖
+	if prompt, _ := GetSetting("ai_prompt"); prompt != "" && !strings.Contains(prompt, "测试案例") {
+		_ = SaveSetting("ai_prompt", DefaultPatchPrompt)
+	}
+
 	return nil
 }
 
@@ -152,8 +228,8 @@ func migrateTablesV2() error {
 // GetSSOConfig 获取 SSO/JIRA 配置
 func GetSSOConfig() (*model.SSOConfig, error) {
 	var cfg model.SSOConfig
-	err := DB.QueryRow(`SELECT id, username, password, base_url, login_url, created_at, updated_at FROM sso_config WHERE id = 1`).Scan(
-		&cfg.ID, &cfg.Username, &cfg.Password, &cfg.BaseURL, &cfg.LoginURL, &cfg.CreatedAt, &cfg.UpdatedAt)
+	err := DB.QueryRow(`SELECT id, username, password, base_url, login_url, wiki_url, created_at, updated_at FROM sso_config WHERE id = 1`).Scan(
+		&cfg.ID, &cfg.Username, &cfg.Password, &cfg.BaseURL, &cfg.LoginURL, &cfg.WikiURL, &cfg.CreatedAt, &cfg.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -173,15 +249,16 @@ func SaveSSOConfig(cfg *model.SSOConfig) error {
 		return fmt.Errorf("encrypt sso password: %w", err)
 	}
 	_, err = DB.Exec(`
-		INSERT INTO sso_config (id, username, password, base_url, login_url, updated_at)
-		VALUES (1, ?, ?, ?, ?, ?)
+		INSERT INTO sso_config (id, username, password, base_url, login_url, wiki_url, updated_at)
+		VALUES (1, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			username = excluded.username,
 			password = excluded.password,
 			base_url = excluded.base_url,
 			login_url = excluded.login_url,
+			wiki_url = excluded.wiki_url,
 			updated_at = excluded.updated_at`,
-		cfg.Username, encPwd, cfg.BaseURL, cfg.LoginURL, time.Now())
+		cfg.Username, encPwd, cfg.BaseURL, cfg.LoginURL, cfg.WikiURL, time.Now())
 	if err != nil {
 		return fmt.Errorf("save sso config: %w", err)
 	}
@@ -826,4 +903,90 @@ func SaveSetting(key, value string) error {
 	_, err := DB.Exec(`INSERT INTO settings (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)
 		ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP`, key, value)
 	return err
+}
+
+// --- AI Summary operations ---
+
+// GetAISummary 获取指定邮件的 AI 汇总缓存
+func GetAISummary(mailID int64) (*model.AISummary, error) {
+	var s model.AISummary
+	var jiraLinksJSON, wikiLinksJSON string
+	err := DB.QueryRow(`
+		SELECT id, mail_id, subject, summary, provider, model, jira_links, wiki_links, created_at, updated_at
+		FROM ai_summaries WHERE mail_id = ?`, mailID,
+	).Scan(&s.ID, &s.MailID, &s.Subject, &s.Summary, &s.Provider, &s.Model, &jiraLinksJSON, &wikiLinksJSON, &s.CreatedAt, &s.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	_ = json.Unmarshal([]byte(jiraLinksJSON), &s.JiraLinks)
+	_ = json.Unmarshal([]byte(wikiLinksJSON), &s.WikiLinks)
+	return &s, nil
+}
+
+// SaveAISummary 保存或更新 AI 汇总结果
+func SaveAISummary(s *model.AISummary) error {
+	jiraLinksJSON, _ := json.Marshal(s.JiraLinks)
+	wikiLinksJSON, _ := json.Marshal(s.WikiLinks)
+
+	result, err := DB.Exec(`
+		INSERT INTO ai_summaries (mail_id, subject, summary, provider, model, jira_links, wiki_links, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(mail_id) DO UPDATE SET
+			subject = excluded.subject,
+			summary = excluded.summary,
+			provider = excluded.provider,
+			model = excluded.model,
+			jira_links = excluded.jira_links,
+			wiki_links = excluded.wiki_links,
+			updated_at = excluded.updated_at`,
+		s.MailID, s.Subject, s.Summary, s.Provider, s.Model, string(jiraLinksJSON), string(wikiLinksJSON), time.Now())
+	if err != nil {
+		return fmt.Errorf("save ai summary: %w", err)
+	}
+	id, _ := result.LastInsertId()
+	if id > 0 {
+		s.ID = id
+	}
+	return nil
+}
+
+// DeleteAISummary 删除指定邮件的 AI 汇总
+func DeleteAISummary(mailID int64) error {
+	_, err := DB.Exec(`DELETE FROM ai_summaries WHERE mail_id = ?`, mailID)
+	return err
+}
+
+// GetAISummariesByMailIDs 批量获取 AI 汇总（用于列表页标记已分析状态）
+func GetAISummariesByMailIDs(mailIDs []int64) (map[int64]*model.AISummary, error) {
+	if len(mailIDs) == 0 {
+		return make(map[int64]*model.AISummary), nil
+	}
+	placeholders := make([]string, len(mailIDs))
+	args := make([]interface{}, len(mailIDs))
+	for i, id := range mailIDs {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+	query := fmt.Sprintf(`
+		SELECT id, mail_id, subject, summary, provider, model, jira_links, wiki_links, created_at, updated_at
+		FROM ai_summaries WHERE mail_id IN (%s)`, strings.Join(placeholders, ","))
+
+	rows, err := DB.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	result := make(map[int64]*model.AISummary)
+	for rows.Next() {
+		var s model.AISummary
+		var jiraLinksJSON, wikiLinksJSON string
+		if err := rows.Scan(&s.ID, &s.MailID, &s.Subject, &s.Summary, &s.Provider, &s.Model, &jiraLinksJSON, &wikiLinksJSON, &s.CreatedAt, &s.UpdatedAt); err != nil {
+			continue
+		}
+		_ = json.Unmarshal([]byte(jiraLinksJSON), &s.JiraLinks)
+		_ = json.Unmarshal([]byte(wikiLinksJSON), &s.WikiLinks)
+		result[s.MailID] = &s
+	}
+	return result, rows.Err()
 }
