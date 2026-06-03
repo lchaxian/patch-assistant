@@ -252,7 +252,7 @@ func callAIWithTools(cfg *model.AIConfig, userPrompt string, tools []toolDef) (s
 	}
 
 	messages := []chatMessage{
-		{Role: "system", Content: "你是一个专业的软件 Patch 分析助手，请用中文回答。如果邮件中包含 WARP 开头的工单编号，请使用 query_warp_issue 工具查询工单详情，使用 search_wiki 工具搜索 Wiki 上的相关文档和附件（会自动获取页面正文和文本类附件内容），如果搜索结果内容不够详细，可使用 get_wiki_page 工具按页面 ID 获取完整内容。结合 JIRA 工单和 Wiki 文档内容进行更深入的分析，并基于这些内容生成测试案例。如果 Wiki 附件是 SQL、properties 等文本内容，在 Wiki 相关信息部分直接输出原文。"},
+		{Role: "system", Content: "你是一个专业的软件 Patch 分析助手，请用中文回答。如果邮件中包含 WARP 开头的工单编号，请使用 query_warp_issue 工具查询工单详情，使用 search_wiki 工具搜索 Wiki 上的相关文档和附件（会自动获取页面正文和文本类附件内容），如果搜索结果内容不够详细，可使用 get_wiki_page 工具按页面 ID 获取完整内容。结合 JIRA 工单和 Wiki 文档内容进行更深入的分析，并基于这些内容生成测试案例。重要：JIRA 工单和 Wiki 文档内容必须直接内嵌展示在输出中，不要只放链接。用户应在当前页面就能看到完整信息，原文链接仅作为参考附在末尾。如果 Wiki 附件是 SQL、properties 等文本内容，用代码块包裹直接输出原文。"},
 		{Role: "user", Content: userPrompt},
 	}
 

@@ -28,12 +28,23 @@ search_wiki 会自动获取页面正文和文本类附件（如 .sql、.txt、.p
 
 结合 JIRA 工单和 Wiki 搜索结果，更全面地分析 Patch 调整的原因和影响。
 
+重要：JIRA 工单内容和 Wiki 文档内容请直接内嵌展示在输出中，不要只放链接让用户跳转查看。用户应该在当前页面就能看到完整信息，原文链接仅作为参考附在末尾。
+
 请按以下格式输出：
 
 ## Patch 基本信息
 - 产品及版本
 - Patch 类型（预览/通用/定向）
 - Patch 日期
+
+## JIRA 工单详情
+对每个查询到的 WARP 工单，直接展示完整内容，格式如下：
+
+### WARP-xxxxx：工单标题
+- **状态**：工单状态
+- **描述**：工单描述内容（直接贴出，不要省略）
+- **关键评论**：贴出重要评论内容（如解决方案、根因分析等）
+- **原文链接**：[WARP-xxxxx](JIRA 工单 URL)
 
 ## 调整内容
 列出本次 Patch 涉及的主要调整和修复内容
@@ -45,7 +56,17 @@ search_wiki 会自动获取页面正文和文本类附件（如 .sql、.txt、.p
 部署或升级时需要注意的事项
 
 ## Wiki 相关信息
-列出从 Wiki 搜索到的与本次 Patch 相关的文档和附件内容摘要。如果 Wiki 附件是 SQL 脚本、properties 配置等文本内容，直接输出附件原文内容，方便验证和执行。
+对每个搜索到的 Wiki 文档，直接展示内容，格式如下：
+
+### 文档名称
+直接贴出页面正文内容（不要省略或只写摘要）
+
+如果是附件，按以下格式输出：
+
+**附件：文件名**（如 .sql、.properties 等文本附件）
+直接贴出附件原文内容，用代码块包裹，方便复制和执行
+
+[查看 Wiki 原文](Wiki 页面 URL)
 
 ## 测试案例
 根据 JIRA 工单描述、Wiki 文档内容（尤其是附件中的测试 SQL、配置文件等），为每个调整项生成对应的测试案例。格式如下：
@@ -57,7 +78,7 @@ search_wiki 会自动获取页面正文和文本类附件（如 .sql、.txt、.p
   1. 步骤一
   2. 步骤二
 - **预期结果**：期望的测试结果
-- **验证 SQL/脚本**：（如果 Wiki 附件中有测试 SQL，直接引用）
+- **验证 SQL/脚本**：（如果 Wiki 附件中有测试 SQL，直接引用，用代码块包裹）
 
 ---
 
@@ -215,8 +236,8 @@ func migrateTablesV2() error {
 		}
 	}
 
-	// 升级旧版 AI prompt：如果已存储的 prompt 不包含"测试案例"章节，说明是旧版，用默认 prompt 覆盖
-	if prompt, _ := GetSetting("ai_prompt"); prompt != "" && !strings.Contains(prompt, "测试案例") {
+	// 升级旧版 AI prompt：如果已存储的 prompt 不包含"JIRA 工单详情"章节，说明是旧版，用默认 prompt 覆盖
+	if prompt, _ := GetSetting("ai_prompt"); prompt != "" && !strings.Contains(prompt, "JIRA 工单详情") {
 		_ = SaveSetting("ai_prompt", DefaultPatchPrompt)
 	}
 
