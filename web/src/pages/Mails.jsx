@@ -83,6 +83,22 @@ export default function Mails() {
     }
   }
 
+  // 面板打开时锁定背景页面滚动，关闭时恢复
+  useEffect(() => {
+    const el = document.querySelector('.main-content')
+    if (selectedMail) {
+      if (el) el.style.overflow = 'hidden'
+      document.body.style.overflow = 'hidden'
+    } else {
+      if (el) el.style.overflow = ''
+      document.body.style.overflow = ''
+    }
+    return () => {
+      if (el) el.style.overflow = ''
+      document.body.style.overflow = ''
+    }
+  }, [selectedMail])
+
   function handleCloseDetail() {
     setSelectedMail(null)
     setMailDetail(null)
@@ -250,13 +266,15 @@ export default function Mails() {
                 display: 'block'
               }}
               sandbox="allow-same-origin"
+              scrolling="no"
               onLoad={(e) => {
-                // 自动调整 iframe 高度
+                // 自动调整 iframe 高度，隐藏内部滚动条
                 const iframe = e.target
                 try {
-                  const body = iframe.contentDocument?.body
-                  if (body) {
-                    iframe.style.height = Math.max(body.scrollHeight + 20, 400) + 'px'
+                  const doc = iframe.contentDocument
+                  if (doc && doc.body) {
+                    iframe.style.height = Math.max(doc.body.scrollHeight + 20, 400) + 'px'
+                    doc.body.style.overflow = 'hidden'
                   }
                 } catch (err) {
                   // 跨域限制，忽略

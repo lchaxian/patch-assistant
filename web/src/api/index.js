@@ -42,12 +42,23 @@ export const patchApi = {
     const query = new URLSearchParams(params).toString();
     return request(`/patches/summary${query ? '?' + query : ''}`);
   },
+  syncStatus: () => request('/patches/sync-status'),
+  imapCount: (params = {}) => {
+    const query = new URLSearchParams(params).toString();
+    return request(`/patches/imap-count${query ? '?' + query : ''}`);
+  },
 };
 
 // JIRA 配置
 export const jiraApi = {
   get: () => request('/jira-config'),
   save: (data) => request('/jira-config', { method: 'POST', body: JSON.stringify(data) }),
+};
+
+// Patch 来源邮箱
+export const patchSourceApi = {
+  get: () => request('/patch-sources'),
+  save: (emails) => request('/patch-sources', { method: 'POST', body: JSON.stringify({ emails }) }),
 };
 
 // 初始化配置状态

@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { accountApi, jiraApi, aiApi } from '../api'
+import { accountApi, jiraApi, aiApi, patchSourceApi } from '../api'
 import {
   Users, Eye, EyeOff, CheckCircle, AlertCircle, X, Plus, Trash2, Edit3,
   Star, Sparkles, Settings as SettingsIcon, Mail, Server
@@ -8,6 +8,7 @@ import dayjs from 'dayjs'
 
 const TABS = [
   { key: 'accounts', label: '邮箱账户', icon: Users },
+  { key: 'patch_sources', label: 'Patch 来源', icon: Mail },
   { key: 'jira', label: 'Jira 配置', icon: Server },
   { key: 'ai', label: 'AI 配置', icon: Sparkles },
 ]
@@ -55,6 +56,7 @@ export default function Settings() {
       </div>
 
       {activeTab === 'accounts' && <AccountsSection />}
+      {activeTab === 'patch_sources' && <PatchSourcesSection />}
       {activeTab === 'jira' && <JiraSection />}
       {activeTab === 'ai' && <AISection />}
     </div>
@@ -503,6 +505,99 @@ function AlertBox({ kind, text, onClose }) {
       {isSuccess ? <CheckCircle size={14} /> : <AlertCircle size={14} />}
       <span style={{ flex: 1 }}>{text}</span>
       <button onClick={onClose} style={{ padding: 2, border: 'none', background: 'none', cursor: 'pointer', color: 'inherit' }}><X size={14} /></button>
+    </div>
+  )
+}
+
+/* ========== Patch 来源邮箱 ========== */
+function PatchSourcesSection() {
+  const [emails, setEmails] = useState([])
+  const [newEmail, setNewEmail] = useState('')
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
+  const [msg, setMsg] = useState(null)
+
+  useEffect(() => {
+    patchSourceApi.get().then(res => {
+      setEmails(res.data || [])
+      setLoading(false)
+    }).catch(() => setLoading(false))
+  }, [])
+
+  const handleAdd = () => {
+    const e = newEmail.trim()
+    if (!e) return
+    if (emails.includes(e)) { setMsg({ kind: 'error', text: '该邮箱已存在' }); return }
+    const updated = [...emails, e]
+    setEmails(updated)
+    setNewEmail('')
+    handleSave(updated)
+  }
+
+  const handleRemove = (idx) => {
+    const updated = emails.filter((_, i) => i !== idx)
+    setEmails(updated)
+    handleSave(updated)
+  }
+
+  const handleSave = async (list) => {
+    setSaving(true)
+    setMsg(null)
+    try {
+      const res = await patchSourceApi.save(list)
+      setEmails(res.data || list)
+      setMsg({ kind: 'success', text: '保存成功' })
+    } catch (e) {
+      setMsg({ kind: 'error', text: '保存失败' })
+    } finally {
+      setSaving(false)
+      setTimeout(() => setMsg(null), 2000)
+    }
+  }
+
+  if (loading) return <div style={{ textAlign: 'center', padding: 48 }}><div className="loading-spinner" /></div>
+
+  return (
+    <div>
+      <p style={{ fontSize: 14, color: 'var(--text-secondary)', marginBottom: 16 }}>
+        配置 Patch 发布通知的来源邮箱，同步邮件时只拉取来自这些邮箱的邮件。未配置时默认按标题含 "Patch" 过滤。
+      </p>
+
+      {msg && <AlertBox kind={msg.kind} text={msg.text} onClose={() => setMsg(null)} />}
+
+      <div className="card" style={{ padding: '24px 28px', maxWidth: 600 }}>
+        <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
+          <input
+            value={newEmail}
+            onChange={e => setNewEmail(e.target.value)}
+            onKeyDown={e => e.key === 'Enter' && handleAdd()}
+            placeholder="输入邮箱地址，如 TPOMS@transwarp.io"
+            style={{ flex: 1, padding: '10px 14px', border: '1px solid var(--border)', borderRadius: 'var(--radius)', fontSize: 14, outline: 'none', color: 'var(--text)' }}
+          />
+          <button onClick={handleAdd} disabled={saving || !newEmail.trim()} className="btn btn-primary btn-sm">
+            <Plus size={14} /> 添加
+          </button>
+        </div>
+
+        {emails.length === 0 ? (
+          <div style={{ textAlign: 'center', padding: 24, color: 'var(--text-secondary)', fontSize: 13 }}>
+            <Mail size={32} style={{ opacity: 0.3, marginBottom: 8 }} />
+            <p>尚未配置来源邮箱，当前按标题 "Patch" 过滤</p>
+          </div>
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {emails.map((email, idx) => (
+              <div key={idx} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px', background: 'var(--bg)', borderRadius: 'var(--radius)', border: '1px solid var(--border)' }}>
+                <Mail size={14} style={{ color: 'var(--primary)', flexShrink: 0 }} />
+                <span style={{ flex: 1, fontSize: 14, color: 'var(--text)' }}>{email}</span>
+                <button onClick={() => handleRemove(idx)} style={{ padding: 4, border: 'none', background: 'none', cursor: 'pointer', color: 'var(--text-muted)' }}>
+                  <Trash2 size={14} />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   )
 }

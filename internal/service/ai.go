@@ -84,13 +84,13 @@ var wikiToolDef = toolDef{
 	Type: "function",
 	Function: toolFuncDef{
 		Name:        "search_wiki",
-		Description: "搜索 Wiki（https://wiki.transwarp.io）上与指定 WARP 编号相关的文档和附件。返回标题中包含该 WARP 编号的相关结果及链接。对于页面类型结果，会自动获取页面正文和附件内容（如 SQL 文件），供深入分析。",
+		Description: "搜索 Wiki（https://wiki.transwarp.io）上与指定 WARP 编号相关的文档和附件。只用 WARP 编号（如 WARP-49878）作为搜索词，不要加其他关键词。返回标题中包含该 WARP 编号的相关结果。对于页面类型结果，会自动获取页面正文和附件内容（如 SQL 文件）。特别注意：Wiki 附件中经常有与 WARP 编号对应的 SQL 测试文件（如 WARP-49878.sql），这类文件必须纳入分析。",
 		Parameters: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"query": map[string]interface{}{
 					"type":        "string",
-					"description": "WARP 编号，如 WARP-138971",
+					"description": "WARP 编号，如 WARP-49878。只传 WARP 编号，不要加其他关键词",
 				},
 			},
 			"required": []string{"query"},
@@ -139,9 +139,13 @@ func SummarizePatchMail(mailID int64, customPrompt string) (*model.AISummarizeRe
 		}
 	}
 
-	mailContent := mail.BodyText
-	if mailContent == "" && mail.BodyHTML != "" {
+	// 优先从 HTML 提取完整正文（纯文本 body_text 通常只是摘要，完整内容在 HTML 中）
+	mailContent := ""
+	if mail.BodyHTML != "" {
 		mailContent = wiki.StripHTMLTags(mail.BodyHTML)
+	}
+	if mailContent == "" && mail.BodyText != "" {
+		mailContent = mail.BodyText
 	}
 	if mailContent == "" {
 		return nil, fmt.Errorf("邮件没有正文内容，无法进行 AI 汇总")
@@ -252,7 +256,7 @@ func callAIWithTools(cfg *model.AIConfig, userPrompt string, tools []toolDef) (s
 	}
 
 	messages := []chatMessage{
-		{Role: "system", Content: "你是一个专业的软件 Patch 分析助手，请用中文回答。如果邮件中包含 WARP 开头的工单编号，请使用 query_warp_issue 工具查询工单详情，使用 search_wiki 工具搜索 Wiki 上的相关文档和附件（会自动获取页面正文和文本类附件内容），如果搜索结果内容不够详细，可使用 get_wiki_page 工具按页面 ID 获取完整内容。结合 JIRA 工单和 Wiki 文档内容进行更深入的分析，并基于这些内容生成测试案例。重要：JIRA 工单和 Wiki 文档内容必须直接内嵌展示在输出中，不要只放链接。用户应在当前页面就能看到完整信息，原文链接仅作为参考附在末尾。如果 Wiki 附件是 SQL、properties 等文本内容，用代码块包裹直接输出原文。"},
+		{Role: "system", Content: "你是一个专业的软件 Patch 分析助手，请用中文回答。搜索 Wiki 时，只用 WARP 编号（如 WARP-49878）作为搜索词，不要加产品名、版本号等其他关键词。Wiki 附件中经常有与 WARP 编号对应的 SQL 测试文件（如 WARP-49878.sql），如果搜索到这类附件，必须纳入分析，用代码块包裹 SQL 原文，方便用户直接复制执行。查询 JIRA 工单请使用 query_warp_issue 工具。如果 Wiki 搜索结果中有测试报告等无关页面，直接跳过，不要将其附件加入分析。结果内容不够详细时，用 get_wiki_page 获取完整页面内容。JIRA 工单和 Wiki 文档内容必须直接内嵌在输出中，不要只放链接。"},
 		{Role: "user", Content: userPrompt},
 	}
 
@@ -471,7 +475,13 @@ func executeSearchWiki(arguments string) (string, []wiki.SearchItem) {
 		return `{"error": "query 不能为空"}`, nil
 	}
 
-	log.Printf("[AI] 执行 search_wiki: query=%s", query)
+	// 只保留 WARP 编号作为搜索词，移除其他关键词
+	warpOnly := warpKeyRegex.FindString(strings.ToUpper(query))
+	if warpOnly != "" {
+		query = warpOnly
+	}
+
+	log.Printf("[AI] 执行 search_wiki: raw_query=%s, search_query=%s", args.Query, query)
 
 	ssoCfg, err := db.GetSSOConfig()
 	if err != nil {
@@ -509,6 +519,7 @@ func executeSearchWiki(arguments string) (string, []wiki.SearchItem) {
 	}
 
 	// 构建返回给 AI 的结构化数据
+	// 注意：无关页面（如测试报告）的正文已在 SearchWiki 中过滤，附件仍保留
 	var results []map[string]interface{}
 	for _, item := range searchResult.Results {
 		r := map[string]interface{}{
@@ -540,7 +551,7 @@ func executeSearchWiki(arguments string) (string, []wiki.SearchItem) {
 		return fmt.Sprintf(`{"error": "序列化结果失败: %v"}`, err), nil
 	}
 
-	log.Printf("[AI] 搜索 Wiki '%s' 成功，找到 %d 条相关结果", query, len(results))
+	log.Printf("[AI] 搜索 Wiki '%s' 成功，返回 %d 条结果", query, len(results))
 	return string(jsonBytes), searchResult.Results
 }
 

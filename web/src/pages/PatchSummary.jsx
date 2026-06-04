@@ -10,11 +10,19 @@ export default function PatchSummary() {
   const [patches, setPatches] = useState(null)
   const [accounts, setAccounts] = useState([])
   const [selectedAccount, setSelectedAccount] = useState('')
-  const [timeRange, setTimeRange] = useState('week')
+  const [timeRange, setTimeRange] = useState('30d')
   const [customStartDate, setCustomStartDate] = useState('')
   const [customEndDate, setCustomEndDate] = useState('')
   const [loading, setLoading] = useState(false)
-  const [syncing, setSyncing] = useState(false)
+  const [syncing, setSyncing] = useState(() => {
+    return sessionStorage.getItem('patch_syncing') === 'true'
+  })
+  const [syncResults, setSyncResults] = useState(() => {
+    try { const s = sessionStorage.getItem('patch_syncResults'); return s ? JSON.parse(s) : null } catch { return null }
+  })
+  const [staleMinutes, setStaleMinutes] = useState(() => {
+    const v = sessionStorage.getItem('patch_staleMinutes'); return v ? Number(v) : null
+  })
   const [error, setError] = useState('')
   const [expandedProduct, setExpandedProduct] = useState({})
 
@@ -34,7 +42,77 @@ export default function PatchSummary() {
 
   useEffect(() => { loadAccounts() }, [])
 
+  // 如果从 sessionStorage 恢复了 syncing 状态（用户中途离开又返回），保持同步 UI 并等待完成
+  useEffect(() => {
+    if (sessionStorage.getItem('patch_syncing') !== 'true') return
+    // 同步可能仍在后台进行，轮询 sessionStorage 等待 syncResults 出现
+    const poll = setInterval(() => {
+      if (sessionStorage.getItem('patch_syncResults')) {
+        // 同步已完成，加载结果
+        clearInterval(poll)
+        setSyncing(false)
+        sessionStorage.removeItem('patch_syncing')
+        loadSummary(false)
+      }
+    }, 2000)
+    // 5 分钟超时保护
+    const timeout = setTimeout(() => {
+      clearInterval(poll)
+      setSyncing(false)
+      sessionStorage.removeItem('patch_syncing')
+      loadSummary(false)
+    }, 300000)
+    return () => { clearInterval(poll); clearTimeout(timeout) }
+  }, [])
+
   useEffect(() => { loadSummary(false) }, [selectedAccount, timeRange, customStartDate, customEndDate])
+
+  // 面板打开时锁定背景页面滚动，关闭时恢复
+  useEffect(() => {
+    const el = document.querySelector('.main-content')
+    if (selectedPatch || showAIPanel) {
+      if (el) el.style.overflow = 'hidden'
+      document.body.style.overflow = 'hidden'
+    } else {
+      if (el) el.style.overflow = ''
+      document.body.style.overflow = ''
+    }
+    return () => {
+      if (el) el.style.overflow = ''
+      document.body.style.overflow = ''
+    }
+  }, [selectedPatch, showAIPanel])
+
+  // 定时检查同步状态，超过5分钟提示用户刷新
+  useEffect(() => {
+    const checkSyncStatus = async () => {
+      try {
+        const res = await patchApi.syncStatus()
+        const statuses = res.data || []
+        if (statuses.length === 0) return
+        // 找最早的同步时间
+        let earliest = null
+        for (const s of statuses) {
+          if (!s.last_sync_at) { earliest = null; break }
+          const t = new Date(s.last_sync_at)
+          if (!earliest || t < earliest) earliest = t
+        }
+        let mins = null
+        if (earliest) {
+          const diffMin = Math.floor((Date.now() - earliest.getTime()) / 60000)
+          if (diffMin >= 5) mins = diffMin
+        } else {
+          mins = 999 // 从未同步
+        }
+        setStaleMinutes(mins)
+        if (mins !== null) sessionStorage.setItem('patch_staleMinutes', String(mins))
+        else sessionStorage.removeItem('patch_staleMinutes')
+      } catch (e) { /* 静默失败 */ }
+    }
+    checkSyncStatus()
+    const timer = setInterval(checkSyncStatus, 60000) // 每分钟检查
+    return () => clearInterval(timer)
+  }, [])
 
   const loadAccounts = async () => {
     try {
@@ -53,6 +131,9 @@ export default function PatchSummary() {
   const loadSummary = async (withSync = false) => {
     setLoading(true)
     setError('')
+    // 切换时间范围/账户时，旧的同步结果已不匹配新范围，必须清除
+    setSyncResults(null)
+    sessionStorage.removeItem('patch_syncResults')
     try {
       const params = { range: timeRange }
       if (withSync) params.sync = 'true'
@@ -63,10 +144,18 @@ export default function PatchSummary() {
       }
       const res = await patchApi.summary(params)
       setPatches(res.data)
+      if (res.data?.sync_results) {
+        setSyncResults(res.data.sync_results)
+        sessionStorage.setItem('patch_syncResults', JSON.stringify(res.data.sync_results))
+        // 同步完成，清除 syncing 标记
+        sessionStorage.removeItem('patch_syncing')
+      }
       // 加载完成后，批量获取已有 AI 缓存
       loadAICache(res.data?.patches || [])
     } catch (e) {
       setError(e.message || '加载失败')
+      // 同步请求失败时清除 syncing 标记，避免用户回来卡在同步状态
+      if (withSync) sessionStorage.removeItem('patch_syncing')
     } finally { setLoading(false) }
   }
 
@@ -91,7 +180,16 @@ export default function PatchSummary() {
 
   const handleSyncAndRefresh = async () => {
     setSyncing(true)
-    try { await loadSummary(true) } finally { setSyncing(false) }
+    sessionStorage.setItem('patch_syncing', 'true')
+    setStaleMinutes(null)
+    setSyncResults(null)
+    sessionStorage.removeItem('patch_staleMinutes')
+    sessionStorage.removeItem('patch_syncResults')
+
+    // 直接调同步（不再先调 imap-count 预计数，避免重复 IMAP 连接导致 2x 耗时）
+    try { await loadSummary(true) } finally {
+      setSyncing(false)
+    }
   }
 
   const handleViewDetail = async (patch) => {
@@ -107,6 +205,7 @@ export default function PatchSummary() {
   }
 
   const handleCloseDetail = () => { setSelectedPatch(null); setMailDetail(null) }
+  const handleCloseAIPanel = () => { setShowAIPanel(false) }
 
   const handleAISummarize = async (patch, force = false) => {
     // 已有缓存且非强制刷新，直接展示
@@ -195,10 +294,17 @@ export default function PatchSummary() {
           <div className="filter-group">
             <label>时间范围:</label>
             <div className="time-range-group">
-              {['week', 'year', 'custom'].map(r => (
-                <button key={r} onClick={() => setTimeRange(r)}
-                  className={`time-range-btn ${timeRange === r ? 'active' : ''}`}>
-                  {r === 'week' ? '本周' : r === 'year' ? '本年' : '自定义'}
+              {[
+                { key: '7d', label: '近7天' },
+                { key: '30d', label: '近30天' },
+                { key: '90d', label: '近90天' },
+                { key: 'week', label: '本周' },
+                { key: 'year', label: '本年' },
+                { key: 'custom', label: '自定义' },
+              ].map(r => (
+                <button key={r.key} onClick={() => setTimeRange(r.key)}
+                  className={`time-range-btn ${timeRange === r.key ? 'active' : ''}`}>
+                  {r.label}
                 </button>
               ))}
             </div>
@@ -221,6 +327,16 @@ export default function PatchSummary() {
         </div>
       </div>
 
+      {/* 数据概览 - 简洁版 */}
+      {patches && !loading && !syncing && (
+        <div style={{ marginBottom: 16, fontSize: 13, color: 'var(--text-secondary)', display: 'flex', alignItems: 'center', gap: 8 }}>
+          <span>当前范围共 <b style={{ color: 'var(--text)' }}>{patches.total_count}</b> 条 Patch</span>
+          {accounts.length > 0 && accounts.some(a => a.last_sync_at) && (
+            <span style={{ marginLeft: 12 }}>· 上次同步：{accounts.filter(a => a.last_sync_at).sort((a,b) => new Date(b.last_sync_at) - new Date(a.last_sync_at))[0]?.last_sync_at?.replace('T', ' ')?.slice(0, 16) || '-'}</span>
+          )}
+        </div>
+      )}
+
       {loading && !patches && (
         <div style={{ textAlign: 'center', padding: 40 }}>
           <div className="loading-spinner" style={{ width: 32, height: 32, borderWidth: 3 }} />
@@ -228,10 +344,51 @@ export default function PatchSummary() {
         </div>
       )}
 
-      {syncing && patches && (
-        <div style={{ marginBottom: 16, padding: '10px 16px', background: '#EFF6FF', border: '1px solid #BFDBFE', borderRadius: 'var(--radius-lg)', fontSize: 13, color: '#2563EB', display: 'flex', alignItems: 'center', gap: 8 }}>
+      {/* 同步中提示 */}
+      {syncing && (
+        <div style={{ marginBottom: 16, padding: '10px 16px', background: '#EFF6FF', border: '1px solid #BFDBFE', borderRadius: 'var(--radius-lg)', fontSize: 13, display: 'flex', alignItems: 'center', gap: 8 }}>
           <div className="loading-spinner" style={{ width: 16, height: 16, borderWidth: 2 }} />
-          正在同步邮件，请稍候...
+          <span style={{ color: '#2563EB' }}>正在同步邮件，请稍候...</span>
+        </div>
+      )}
+
+      {/* 同步完成提示 */}
+      {!syncing && syncResults && syncResults.length > 0 && (() => {
+        const totalNewPatch = syncResults.reduce((s, r) => s + (r.new_patch_mails || 0), 0)
+        const rangeLabel = {'7d':'近7天','30d':'近30天','90d':'近90天','week':'本周','year':'本年','custom':'选定范围'}[timeRange] || '当前范围'
+        return (
+          <div style={{ marginBottom: 16, padding: '10px 16px', background: '#F0FDF4', border: '1px solid #BBF7D0', borderRadius: 'var(--radius-lg)', fontSize: 13, display: 'flex', flexDirection: 'column', gap: 4 }}>
+            <div style={{ color: '#16A34A', fontWeight: 500, display: 'flex', alignItems: 'center', gap: 6 }}>
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M6.5 12L2.5 8l1.41-1.41L6.5 9.17l5.59-5.59L13.5 5l-7 7z" fill="#16A34A"/></svg>
+              同步完成 · {rangeLabel}共 {syncResults[0]?.range_patch_total || 0} 条 Patch
+            </div>
+            {syncResults.map((sr, i) => (
+              <div key={i} style={{ color: '#15803D', paddingLeft: 22 }}>
+                {sr.account_email ? `${sr.account_email}：` : ''}
+                {sr.error ? (
+                  <span style={{ color: '#DC2626' }}>同步失败 - {sr.error}</span>
+                ) : (
+                  <>
+                    {sr.new_patch_mails > 0 ? (
+                      <span>新增 <b>{sr.new_patch_mails}</b> 封 Patch 通知</span>
+                    ) : (
+                      '无新 Patch'
+                    )}
+                  </>
+                )}
+              </div>
+            ))}
+          </div>
+        )
+      })()}
+
+      {!syncing && staleMinutes && !syncResults && (
+        <div style={{ marginBottom: 16, padding: '10px 16px', background: '#FFFBEB', border: '1px solid #FDE68A', borderRadius: 'var(--radius-lg)', fontSize: 13, display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }} onClick={handleSyncAndRefresh}>
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 1a7 7 0 100 14A7 7 0 008 1zm.75 4.25v3.5h-1.5v-3.5h1.5zM8 10.5a.75.75 0 110 1.5.75.75 0 010-1.5z" fill="#D97706"/></svg>
+          <span style={{ color: '#92400E' }}>
+            {staleMinutes >= 999 ? '尚未同步过邮件，点击同步刷新拉取 Patch 通知' :
+             `距上次同步已过 ${staleMinutes >= 60 ? Math.floor(staleMinutes/60) + ' 小时 ' + (staleMinutes%60) + ' 分钟' : staleMinutes + ' 分钟'}，可能有新 Patch，点击刷新`}
+          </span>
         </div>
       )}
 
@@ -290,25 +447,35 @@ export default function PatchSummary() {
                 {isExpanded && (
                   <div className="product-card-body">
                     <div className="table-wrapper">
-                      <table>
+                      <table style={{ tableLayout: 'fixed', width: '100%' }}>
+                        <colgroup>
+                          <col style={{ width: 70 }} />
+                          <col style={{ width: 260 }} />
+                          <col style={{ width: 120 }} />
+                          <col style={{ width: 100 }} />
+                          <col style={{ width: 130 }} />
+                          <col style={{ width: 220 }} />
+                        </colgroup>
                         <thead>
-                          <tr><th>类型</th><th>产品</th><th>版本</th><th>Patch 日期</th><th>序号</th><th>邮件日期</th><th>发件人</th><th>操作</th></tr>
+                          <tr><th>类型</th><th>Patch 名称</th><th>产品</th><th>版本</th><th>Patch 日期</th><th>操作</th></tr>
                         </thead>
                         <tbody>
                           {items.map((p, idx) => {
                             const tc = typeColorMap[p.type] || typeColorMap['通用']
                             const isAIWorking = aiSummarizing[p.mail_id]
                             const hasAIResult = aiResults[p.mail_id]
+                            // 构造简短的 Patch 名称：Patch-产品-版本-日期
+                            const patchName = p.product && p.version && p.patch_date
+                              ? `Patch-${p.product}-${p.version}-${p.patch_date}`
+                              : (p.subject || '-')
                             return (
                               <tr key={idx}>
                                 <td><span style={{ display: 'inline-flex', alignItems: 'center', padding: '2px 8px', borderRadius: 9999, fontSize: 12, fontWeight: 500, background: tc.bg, color: tc.text, border: `1px solid ${tc.border}` }}>{p.type || '通用'}</span></td>
-                                <td style={{ fontWeight: 500 }}>{p.product || '-'}</td>
-                                <td style={{ fontFamily: 'monospace', fontSize: 13 }}>{p.version || '-'}</td>
-                                <td>{p.patch_date ? (<span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><Calendar size={12} />{p.patch_date.slice(0, 4)}-{p.patch_date.slice(4, 6)}-{p.patch_date.slice(6, 8)}</span>) : '-'}</td>
-                                <td style={{ fontFamily: 'monospace' }}>{p.seq || '-'}</td>
-                                <td style={{ fontSize: 13, color: 'var(--text-secondary)' }}>{new Date(p.mail_date).toLocaleDateString('zh-CN')}</td>
-                                <td style={{ fontSize: 13, color: 'var(--text-secondary)' }}>{p.from_name || p.from_addr || '-'}</td>
-                                <td>
+                                <td style={{ fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={patchName}>{patchName}</td>
+                                <td style={{ fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.product || '-'}</td>
+                                <td style={{ fontFamily: 'monospace', fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.version || '-'}</td>
+                                <td style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.patch_date ? (<span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><Calendar size={12} />{p.patch_date.slice(0, 4)}-{p.patch_date.slice(4, 6)}-{p.patch_date.slice(6, 8)}</span>) : '-'}</td>
+                                <td style={{ whiteSpace: 'nowrap' }}>
                                   <div style={{ display: 'flex', gap: 6 }}>
                                     <ActionBtn label="详情" color="var(--primary)" onClick={() => handleViewDetail(p)} />
                                     <ActionBtn
@@ -371,7 +538,7 @@ export default function PatchSummary() {
       </>}
 
       {/* AI 汇总面板 */}
-      {showAIPanel && <><div onClick={() => setShowAIPanel(false)} style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(0,0,0,0.3)', zIndex: 1099 }} />
+      {showAIPanel && <><div onClick={handleCloseAIPanel} style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(0,0,0,0.3)', zIndex: 1099 }} />
         <div style={{ position: 'fixed', top: 0, right: 0, bottom: 0, width: '55%', minWidth: 460, backgroundColor: '#FFFFFF', borderLeft: '1px solid var(--border)', boxShadow: '-4px 0 24px rgba(0,0,0,0.12)', zIndex: 1100, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
           <div style={{ padding: '16px 24px', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: 12, background: 'linear-gradient(135deg, #F5F3FF 0%, #EEF2FF 100%)' }}>
             <Sparkles size={18} color="#7C3AED" />
@@ -387,7 +554,7 @@ export default function PatchSummary() {
               </button>
             )}
             <span style={{ flex: 1 }}></span>
-            <button onClick={() => setShowAIPanel(false)} style={{ padding: 4, border: 'none', background: 'none', cursor: 'pointer', color: 'var(--text-muted)' }}><X size={18} /></button>
+            <button onClick={handleCloseAIPanel} style={{ padding: 4, border: 'none', background: 'none', cursor: 'pointer', color: 'var(--text-muted)' }}><X size={18} /></button>
           </div>
           <div style={{ flex: 1, overflow: 'auto', padding: '20px 24px' }}>
             {aiLoading ? (
@@ -533,8 +700,8 @@ function MailBodyContent({ detail }) {
       )}
       {showHtml && hasHtml ? (
         <div style={{ border: '1px solid var(--border)', borderRadius: 'var(--radius-lg)', overflow: 'hidden', backgroundColor: '#fff' }}>
-          <iframe srcDoc={detail.body_html} title="邮件正文" style={{ width: '100%', minHeight: 400, border: 'none', display: 'block' }} sandbox="allow-same-origin"
-            onLoad={(e) => { const iframe = e.target; try { const body = iframe.contentDocument?.body; if (body) iframe.style.height = Math.max(body.scrollHeight + 20, 400) + 'px' } catch {} }}
+          <iframe srcDoc={detail.body_html} title="邮件正文" style={{ width: '100%', minHeight: 400, border: 'none', display: 'block' }} sandbox="allow-same-origin" scrolling="no"
+            onLoad={(e) => { const iframe = e.target; try { const doc = iframe.contentDocument; if (doc && doc.body) { iframe.style.height = Math.max(doc.body.scrollHeight + 20, 400) + 'px'; doc.body.style.overflow = 'hidden' } } catch {} }}
           />
         </div>
       ) : (

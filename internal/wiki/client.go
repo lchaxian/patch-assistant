@@ -271,6 +271,17 @@ func SearchWiki(cfg Config, query string) (*SearchResult, error) {
 	}
 
 	// --- 第二轮：搜索页面 ---
+	// 无关页面关键词：标题包含这些词的页面正文通常与 Patch 分析无关，但其附件（如 SQL 文件）可能仍有价值
+	irrelevantPageKeywords := []string{"测试报告", "测试用例报告", "自动化测试报告", "回归测试报告", "集成测试报告", "性能测试报告", "压力测试报告", "验收测试报告"}
+	isIrrelevantPage := func(title string) bool {
+		for _, kw := range irrelevantPageKeywords {
+			if strings.Contains(title, kw) {
+				return true
+			}
+		}
+		return false
+	}
+
 	pageCQL := fmt.Sprintf(`title ~ "%s" AND type in ("page","blogpost")`, query)
 	pageResults, err := searchByCQL(cfg, baseURL, pageCQL, 5)
 	if err != nil {
@@ -297,19 +308,30 @@ func SearchWiki(cfg Config, query string) (*SearchResult, error) {
 				Excerpt: item.Excerpt,
 			}
 
-			// 获取页面正文和附件
+			irrelevant := isIrrelevantPage(title)
+
+			// 获取页面正文和附件（即使无关页面也要获取附件，SQL 文件可能在上面）
 			pageDetail, pageErr := GetPageContent(cfg, item.Content.ID)
 			if pageErr != nil {
 				log.Printf("[Wiki] 获取页面 %s 正文失败: %v", item.Content.ID, pageErr)
 			} else {
-				if pageDetail.Body != "" {
+				// 无关页面跳过正文，只保留标题包含 WARP 号的附件
+				if pageDetail.Body != "" && !irrelevant {
 					si.Content = truncateText(StripHTMLTags(pageDetail.Body), 5000)
 				}
+				if irrelevant {
+					log.Printf("[Wiki] 无关页面跳过正文: %s", title)
+				}
+				// 无关页面仅保留标题包含 WARP 号的附件；相关页面保留所有文本附件
 				for _, att := range pageDetail.Attachments {
-					if att.Content != "" && !seenFiles[att.Title] {
-						seenFiles[att.Title] = true
-						si.Content += fmt.Sprintf("\n\n--- 附件: %s ---\n%s", att.Title, truncateText(att.Content, 5000))
+					if att.Content == "" || seenFiles[att.Title] {
+						continue
 					}
+					if irrelevant && !strings.Contains(strings.ToUpper(att.Title), warpKey) {
+						continue
+					}
+					seenFiles[att.Title] = true
+					si.Content += fmt.Sprintf("\n\n--- 附件: %s ---\n%s", att.Title, truncateText(att.Content, 5000))
 				}
 			}
 
@@ -598,34 +620,57 @@ func FetchWikiPageByURL(cfg Config, rawURL string) (*PageDetail, error) {
 
 // --- 工具函数 ---
 
-// StripHTMLTags 移除 HTML 标签，返回纯文本
+// StripHTMLTags 移除 HTML 标签，返回纯文本（块级标签处自动换行）
 func StripHTMLTags(html string) string {
 	var result strings.Builder
+	var tagBuf strings.Builder
 	inTag := false
-	inEntity := false
 	for _, r := range html {
 		if r == '<' {
 			inTag = true
+			tagBuf.Reset()
+			tagBuf.WriteRune(r)
 			continue
 		}
 		if r == '>' {
 			inTag = false
+			tagBuf.WriteRune(r)
+			tagName := extractTagName(tagBuf.String())
+			switch tagName {
+			case "p", "div", "br", "li", "h1", "h2", "h3", "h4", "h5", "h6", "hr", "blockquote", "table", "tr":
+				result.WriteRune('\n')
+			case "td", "th":
+				result.WriteRune('	')
+			}
 			continue
 		}
-		if r == '&' {
-			inEntity = true
-		}
-		if inEntity && r == ';' {
-			inEntity = false
-			// 将常见实体转换为空格
-			result.WriteRune(' ')
+		if inTag {
+			tagBuf.WriteRune(r)
 			continue
 		}
-		if !inTag && !inEntity {
-			result.WriteRune(r)
+		result.WriteRune(r)
+	}
+	// 清理连续空行
+	text := strings.TrimSpace(result.String())
+	lines := strings.Split(text, "\n")
+	var cleaned []string
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed != "" {
+			cleaned = append(cleaned, trimmed)
 		}
 	}
-	return strings.TrimSpace(result.String())
+	return strings.Join(cleaned, "\n")
+}
+
+// extractTagName 从 HTML 标签字符串中提取标签名，如 "<br/>" → "br", "</p>" → "p"
+func extractTagName(tag string) string {
+	tag = strings.Trim(tag, "<>")
+	tag = strings.TrimPrefix(tag, "/")
+	if idx := strings.IndexAny(tag, " 	\n\r/>"); idx > 0 {
+		tag = tag[:idx]
+	}
+	return strings.ToLower(tag)
 }
 
 // truncateText 截断文本

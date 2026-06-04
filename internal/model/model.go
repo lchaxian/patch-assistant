@@ -61,10 +61,13 @@ type MailSummaryPerAccount struct {
 
 // SyncResult 同步结果
 type SyncResult struct {
-	AccountID  int64  `json:"account_id"`
-	NewMails   int    `json:"new_mails"`
-	TotalMails int    `json:"total_mails"`
-	Error      string `json:"error,omitempty"`
+	AccountID       int64  `json:"account_id"`
+	AccountEmail    string `json:"account_email"`
+	NewMails        int    `json:"new_mails"`
+	NewPatchMails   int    `json:"new_patch_mails"`
+	RangePatchTotal int    `json:"range_patch_total"`
+	TotalPatchOnServer int `json:"total_patch_on_server"` // IMAP 服务器上符合条件的 Patch 邮件总数（SEARCH 结果）
+	Error           string `json:"error,omitempty"`
 }
 
 // PatchInfo 从 Patch 发布通知邮件标题中解析出的信息
@@ -84,12 +87,12 @@ type PatchInfo struct {
 
 // PatchSummaryResponse Patch 汇总响应
 type PatchSummaryResponse struct {
-	Range      string         `json:"range"`
-	TotalCount int            `json:"total_count"`
-	Patches    []PatchInfo    `json:"patches"`
-	ByProduct  map[string]int `json:"by_product"`
-	ByType     map[string]int `json:"by_type"`
-	SyncResult *SyncResult    `json:"sync_result,omitempty"`
+	Range       string        `json:"range"`
+	TotalCount  int           `json:"total_count"`
+	Patches     []PatchInfo   `json:"patches"`
+	ByProduct   map[string]int `json:"by_product"`
+	ByType      map[string]int `json:"by_type"`
+	SyncResults []SyncResult  `json:"sync_results,omitempty"`
 }
 
 // AIConfig AI 服务配置

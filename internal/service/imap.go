@@ -1,6 +1,7 @@
 package service
 
 import (
+	"encoding/json"
 	"encoding/base64"
 	"fmt"
 	"io"
@@ -9,6 +10,7 @@ import (
 	"mime/multipart"
 	"mime/quotedprintable"
 	"net/mail"
+	"net/textproto"
 	"strings"
 	"time"
 
@@ -127,6 +129,114 @@ func SyncMails(accountID int64, days int) (*model.SyncResult, error) {
 	return SyncMailsSince(accountID, sinceDate)
 }
 
+// PatchCountResult IMAP 上 Patch 邮件计数结果
+type PatchCountResult struct {
+	AccountID      int64  `json:"account_id"`
+	AccountEmail   string `json:"account_email"`
+	TotalOnServer  int    `json:"total_on_server"`  // IMAP 服务器上符合条件的邮件总数
+	AlreadySynced  int    `json:"already_synced"`   // 已同步到本地的数量
+	Error          string `json:"error,omitempty"`
+}
+
+// CountPatchOnServer 轻量计数：只做 IMAP SEARCH，不拉取，快速返回
+func CountPatchOnServer(accountID int64, sinceDate time.Time) (*PatchCountResult, error) {
+	result := &PatchCountResult{AccountID: accountID}
+
+	acc, err := db.GetAccount(accountID)
+	if err != nil {
+		return nil, fmt.Errorf("获取账户信息失败: %w", err)
+	}
+	result.AccountEmail = acc.Email
+
+	password, err := db.GetAccountPassword(accountID)
+	if err != nil {
+		return nil, fmt.Errorf("获取密码失败: %w", err)
+	}
+
+	addr := fmt.Sprintf("%s:%d", acc.IMAPHost, acc.IMAPPort)
+	var c *client.Client
+	if acc.UseTLS {
+		c, err = client.DialTLS(addr, nil)
+	} else {
+		c, err = client.Dial(addr)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("连接服务器失败: %w", err)
+	}
+	defer c.Logout()
+
+	if err := c.Login(acc.Email, password); err != nil {
+		return nil, fmt.Errorf("登录失败: %w", err)
+	}
+
+	mbox, err := c.Select("INBOX", false)
+	if err != nil {
+		return nil, fmt.Errorf("选择 INBOX 失败: %w", err)
+	}
+
+	if mbox.Messages > 0 {
+		sourceEmails := getPatchSourceEmails()
+		if len(sourceEmails) > 0 {
+			// 先按 SUBJECT "Patch" 搜索（结果集约50封），再拉 envelope 客户端过滤 FROM
+			// 比"先 SEARCH FROM 再过滤 Subject"快得多：FROM 搜索可能返回上千封，需要大量 FETCH
+			criteria := imap.NewSearchCriteria()
+			criteria.Since = sinceDate
+			criteria.Header = textproto.MIMEHeader{"Subject": {"Patch"}}
+			uids, err := c.UidSearch(criteria)
+			if err != nil {
+				result.TotalOnServer = 0
+			} else {
+				filteredUids := filterBySourceEmails(c, uids, sourceEmails)
+				result.TotalOnServer = len(filteredUids)
+			}
+		} else {
+			criteria := imap.NewSearchCriteria()
+			criteria.Since = sinceDate
+			criteria.Header = textproto.MIMEHeader{"Subject": {"Patch"}}
+			uids, err := c.UidSearch(criteria)
+			if err != nil {
+				result.TotalOnServer = 0
+			} else {
+				result.TotalOnServer = len(uids)
+			}
+		}
+	}
+
+	// 统计本地已同步的邮件数
+	result.AlreadySynced = countSyncedMails(accountID, sinceDate)
+	return result, nil
+}
+
+// countSyncedMails 统计本地 mails 表中已同步的邮件数（按来源或时间范围）
+func countSyncedMails(accountID int64, sinceDate time.Time) int {
+	sourceEmails := getPatchSourceEmails()
+	var count int64
+	if len(sourceEmails) > 0 {
+		// 按来源邮箱 AND 主题 "Patch" 同时统计
+		placeholders := make([]string, len(sourceEmails))
+		args := []interface{}{sinceDate.Format("2006-01-02 15:04:05")}
+		for i, e := range sourceEmails {
+			placeholders[i] = "?"
+			args = append(args, e)
+		}
+		query := `SELECT COUNT(*) FROM mails WHERE mail_date >= ? AND from_addr IN (` + strings.Join(placeholders, ",") + `) AND subject LIKE '%Patch%'`
+		if accountID > 0 {
+			query += ` AND account_id = ?`
+			args = append(args, accountID)
+		}
+		db.DB.QueryRow(query, args...).Scan(&count)
+	} else {
+		query := `SELECT COUNT(*) FROM mails WHERE mail_date >= ? AND subject LIKE '%Patch%'`
+		args := []interface{}{sinceDate.Format("2006-01-02 15:04:05")}
+		if accountID > 0 {
+			query += ` AND account_id = ?`
+			args = append(args, accountID)
+		}
+		db.DB.QueryRow(query, args...).Scan(&count)
+	}
+	return int(count)
+}
+
 // SyncMailsSince 同步指定日期之后的邮件
 func SyncMailsSince(accountID int64, sinceDate time.Time) (*model.SyncResult, error) {
 	result := &model.SyncResult{AccountID: accountID}
@@ -162,45 +272,124 @@ func SyncMailsSince(accountID int64, sinceDate time.Time) (*model.SyncResult, er
 
 	folders := []string{"INBOX"}
 	for _, folder := range folders {
-		count, err := syncFolderSince(c, accountID, folder, sinceDate)
+		count, total, err := syncFolderSince(c, accountID, folder, sinceDate)
 		if err != nil {
 			log.Printf("同步文件夹 %s 失败: %v", folder, err)
 			continue
 		}
 		result.NewMails += count
+		result.TotalPatchOnServer += total
 	}
-
-	var total int64
-	db.DB.QueryRow(`SELECT COUNT(*) FROM mails WHERE account_id = ?`, accountID).Scan(&total)
-	result.TotalMails = int(total)
 
 	_ = db.UpdateAccountSyncTime(accountID)
 	return result, nil
 }
 
-func syncFolderSince(c *client.Client, accountID int64, folder string, sinceDate time.Time) (int, error) {
+// filterBySourceEmails 拉取 envelope，过滤发件人在 sourceEmails 列表中的 UID
+// 用于"先按 SUBJECT 搜索，再客户端过滤 FROM"策略（比反过来快得多：Patch 邮件远少于某来源邮箱的全部邮件）
+func filterBySourceEmails(c *client.Client, uids []uint32, sourceEmails []string) []uint32 {
+	if len(uids) == 0 {
+		return nil
+	}
+	// 构建小写来源邮箱集合
+	sourceSet := make(map[string]bool, len(sourceEmails))
+	for _, e := range sourceEmails {
+		sourceSet[strings.ToLower(strings.TrimSpace(e))] = true
+	}
+
+	var filtered []uint32
+	batchSize := 200
+	for i := 0; i < len(uids); i += batchSize {
+		end := i + batchSize
+		if end > len(uids) {
+			end = len(uids)
+		}
+		batch := uids[i:end]
+
+		uidSet := new(imap.SeqSet)
+		for _, uid := range batch {
+			uidSet.AddNum(uid)
+		}
+
+		messages := make(chan *imap.Message, 20)
+		go func() {
+			_ = c.UidFetch(uidSet, []imap.FetchItem{imap.FetchEnvelope, imap.FetchUid}, messages)
+		}()
+
+		for msg := range messages {
+			if msg.Envelope == nil {
+				continue
+			}
+			for _, addr := range msg.Envelope.From {
+				if sourceSet[strings.ToLower(addr.Address())] {
+					filtered = append(filtered, msg.Uid)
+					break
+				}
+			}
+		}
+	}
+	return filtered
+}
+
+// getPatchSourceEmails 获取配置的 Patch 来源邮箱列表
+func getPatchSourceEmails() []string {
+	val, err := db.GetSetting("patch_source_emails")
+	if err != nil || val == "" {
+		return nil
+	}
+	var emails []string
+	if err := json.Unmarshal([]byte(val), &emails); err != nil {
+		return nil
+	}
+	return emails
+}
+
+func syncFolderSince(c *client.Client, accountID int64, folder string, sinceDate time.Time) (int, int, error) {
 	mbox, err := c.Select(folder, false)
 	if err != nil {
-		return 0, fmt.Errorf("选择文件夹失败: %w", err)
+		return 0, 0, fmt.Errorf("选择文件夹失败: %w", err)
 	}
 
 	if mbox.Messages == 0 {
-		return 0, nil
+		return 0, 0, nil
 	}
 
-	criteria := imap.NewSearchCriteria()
-	criteria.Since = sinceDate
+	// 先按 SUBJECT "Patch" 搜索，再客户端过滤 FROM；无来源配置则仅按主题过滤
+	// 策略：SUBJECT 搜索结果集约50封，远小于 FROM 搜索的上千封，大幅减少 envelope FETCH 次数
+	sourceEmails := getPatchSourceEmails()
+	var allUids []uint32
 
-	uids, err := c.UidSearch(criteria)
-	if err != nil {
-		return syncRecentMails(c, accountID, folder, mbox, 200)
+	if len(sourceEmails) > 0 {
+		// 按 SUBJECT "Patch" 搜索，客户端过滤 FROM 在来源邮箱列表中
+		criteria := imap.NewSearchCriteria()
+		criteria.Since = sinceDate
+		criteria.Header = textproto.MIMEHeader{"Subject": {"Patch"}}
+		uids, err := c.UidSearch(criteria)
+		if err != nil {
+			log.Printf("[IMAP] 搜索 SUBJECT Patch 失败: %v", err)
+		} else {
+			allUids = filterBySourceEmails(c, uids, sourceEmails)
+		}
+	} else {
+		// 无来源配置，仅按标题 "Patch" 过滤
+		criteria := imap.NewSearchCriteria()
+		criteria.Since = sinceDate
+		criteria.Header = textproto.MIMEHeader{"Subject": {"Patch"}}
+		uids, err := c.UidSearch(criteria)
+		if err != nil {
+			count, fallbackErr := syncRecentMails(c, accountID, folder, mbox, 200)
+			return count, 0, fallbackErr
+		}
+		allUids = uids
 	}
 
-	if len(uids) == 0 {
-		return 0, nil
+	totalOnServer := len(allUids)
+	if totalOnServer == 0 {
+		return 0, 0, nil
 	}
 
-	return twoPhaseSync(c, accountID, folder, uids)
+	newCount, syncErr := twoPhaseSync(c, accountID, folder, allUids)
+	return newCount, totalOnServer, syncErr
 }
 
 func syncRecentMails(c *client.Client, accountID int64, folder string, mbox *imap.MailboxStatus, limit uint32) (int, error) {

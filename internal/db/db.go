@@ -725,6 +725,12 @@ func GetPatchSummaryByRange(accountID int64, timeRange, startDate, endDate strin
 			monday := time.Date(now.Year(), now.Month(), now.Day()-weekday+1, 0, 0, 0, 0, now.Location())
 			dateFilter = ` AND m.mail_date >= ?`
 			args = append(args, monday.Format("2006-01-02 15:04:05"))
+		case "7d":
+			dateFilter = ` AND m.mail_date >= datetime('now', '-7 days')`
+		case "30d":
+			dateFilter = ` AND m.mail_date >= datetime('now', '-30 days')`
+		case "90d":
+			dateFilter = ` AND m.mail_date >= datetime('now', '-90 days')`
 		case "year":
 			dateFilter = ` AND m.mail_date >= datetime('now', 'start of year')`
 		}

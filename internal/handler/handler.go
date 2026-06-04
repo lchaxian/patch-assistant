@@ -1,9 +1,11 @@
 package handler
 
 import (
+	"encoding/json"
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -274,7 +276,8 @@ func GetOverview(c *gin.Context) {
 
 func GetPatchSummary(c *gin.Context) {
 	timeRange := c.DefaultQuery("range", "week")
-	if timeRange != "week" && timeRange != "year" && timeRange != "custom" {
+	allowedRanges := map[string]bool{"7d": true, "30d": true, "90d": true, "week": true, "year": true, "custom": true}
+	if !allowedRanges[timeRange] {
 		timeRange = "week"
 	}
 	startDate := c.Query("start_date")
@@ -299,19 +302,32 @@ func GetPatchSummary(c *gin.Context) {
 			} else {
 				sinceDate = now.AddDate(0, 0, -7)
 			}
-		} else if timeRange == "year" {
-			sinceDate = time.Date(now.Year(), 1, 1, 0, 0, 0, 0, now.Location())
 		} else {
-			weekday := int(now.Weekday())
-			if weekday == 0 {
-				weekday = 7
+			switch timeRange {
+			case "year":
+				sinceDate = time.Date(now.Year(), 1, 1, 0, 0, 0, 0, now.Location())
+			case "7d":
+				sinceDate = now.AddDate(0, 0, -7)
+			case "30d":
+				sinceDate = now.AddDate(0, 0, -30)
+			case "90d":
+				sinceDate = now.AddDate(0, 0, -90)
+			default: // week
+				weekday := int(now.Weekday())
+				if weekday == 0 {
+					weekday = 7
+				}
+				sinceDate = time.Date(now.Year(), now.Month(), now.Day()-weekday+1, 0, 0, 0, 0, now.Location())
 			}
-			sinceDate = time.Date(now.Year(), now.Month(), now.Day()-weekday+1, 0, 0, 0, 0, now.Location())
 		}
 
 		if accountID > 0 {
+			acc, _ := db.GetAccount(accountID)
 			result, err := service.SyncMailsSince(accountID, sinceDate)
 			if err == nil && result != nil {
+				if acc != nil {
+					result.AccountEmail = acc.Email
+				}
 				syncResults = append(syncResults, *result)
 			}
 		} else {
@@ -320,6 +336,7 @@ func GetPatchSummary(c *gin.Context) {
 				for _, acc := range accounts {
 					result, err := service.SyncMailsSince(acc.ID, sinceDate)
 					if err == nil && result != nil {
+						result.AccountEmail = acc.Email
 						syncResults = append(syncResults, *result)
 					}
 				}
@@ -327,17 +344,159 @@ func GetPatchSummary(c *gin.Context) {
 		}
 	}
 
-	service.ParseAndSaveNewPatchMails(accountID)
+	// 填充同步结果中的 Patch 维度数据
+	if len(syncResults) > 0 {
+		for i := range syncResults {
+			// 每个账户单独计算新解析的 Patch 数
+			syncResults[i].NewPatchMails = service.ParseAndSaveNewPatchMails(syncResults[i].AccountID)
+		}
+	}
 
 	resp, err := db.GetPatchSummaryByRange(accountID, timeRange, startDate, endDate)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "查询失败: " + err.Error()})
 		return
 	}
+
 	if len(syncResults) > 0 {
-		resp.SyncResult = &syncResults[0]
+		for i := range syncResults {
+			syncResults[i].RangePatchTotal = resp.TotalCount
+		}
+		resp.SyncResults = syncResults
 	}
 	c.JSON(http.StatusOK, gin.H{"data": resp})
+}
+
+// GetPatchSyncStatus 返回各账户最近同步时间，用于前端判断是否需要提醒用户刷新
+func GetPatchSyncStatus(c *gin.Context) {
+	accounts, err := db.ListAccounts()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	type accountSyncStatus struct {
+		AccountID  int64  `json:"account_id"`
+		Email      string `json:"email"`
+		LastSyncAt string `json:"last_sync_at"`
+	}
+	var statuses []accountSyncStatus
+	for _, acc := range accounts {
+		s := accountSyncStatus{
+			AccountID: acc.ID,
+			Email:     acc.Email,
+		}
+		if acc.LastSyncAt != nil {
+			s.LastSyncAt = acc.LastSyncAt.Format("2006-01-02 15:04:05")
+		}
+		statuses = append(statuses, s)
+	}
+	c.JSON(http.StatusOK, gin.H{"data": statuses})
+}
+
+// GetPatchSources 获取 Patch 来源邮箱列表
+func GetPatchSources(c *gin.Context) {
+	val, err := db.GetSetting("patch_source_emails")
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if val == "" {
+		c.JSON(http.StatusOK, gin.H{"data": []string{}})
+		return
+	}
+	var emails []string
+	if err := json.Unmarshal([]byte(val), &emails); err != nil {
+		c.JSON(http.StatusOK, gin.H{"data": []string{}})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": emails})
+}
+
+// SavePatchSources 保存 Patch 来源邮箱列表
+func SavePatchSources(c *gin.Context) {
+	var req struct {
+		Emails []string `json:"emails" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "参数错误"})
+		return
+	}
+	// 去重去空
+	seen := map[string]bool{}
+	cleaned := []string{}
+	for _, e := range req.Emails {
+		e = strings.TrimSpace(e)
+		if e != "" && !seen[e] {
+			seen[e] = true
+			cleaned = append(cleaned, e)
+		}
+	}
+	data, _ := json.Marshal(cleaned)
+	if err := db.SaveSetting("patch_source_emails", string(data)); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "保存失败"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": cleaned})
+}
+
+// GetPatchIMAPCount 轻量计数：只做 IMAP SEARCH，快速返回服务器上 Patch 邮件总数和已同步数
+func GetPatchIMAPCount(c *gin.Context) {
+	timeRange := c.DefaultQuery("range", "30d")
+	accountIDStr := c.Query("account_id")
+	var accountID int64
+	if accountIDStr != "" {
+		if id, err := strconv.ParseInt(accountIDStr, 10, 64); err == nil {
+			accountID = id
+		}
+	}
+
+	sinceDate := calcSinceDate(timeRange)
+
+	var results []service.PatchCountResult
+	if accountID > 0 {
+		r, err := service.CountPatchOnServer(accountID, sinceDate)
+		if err != nil {
+			c.JSON(http.StatusOK, gin.H{"data": []service.PatchCountResult{{AccountID: accountID, Error: err.Error()}}})
+			return
+		}
+		results = append(results, *r)
+	} else {
+		accounts, err := db.ListAccounts()
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		for _, acc := range accounts {
+			r, err := service.CountPatchOnServer(acc.ID, sinceDate)
+			if err != nil {
+				results = append(results, service.PatchCountResult{AccountID: acc.ID, AccountEmail: acc.Email, Error: err.Error()})
+				continue
+			}
+			results = append(results, *r)
+		}
+	}
+	c.JSON(http.StatusOK, gin.H{"data": results})
+}
+
+// calcSinceDate 根据时间范围计算起始日期
+func calcSinceDate(timeRange string) time.Time {
+	now := time.Now()
+	switch timeRange {
+	case "year":
+		return time.Date(now.Year(), 1, 1, 0, 0, 0, 0, now.Location())
+	case "7d":
+		return now.AddDate(0, 0, -7)
+	case "30d":
+		return now.AddDate(0, 0, -30)
+	case "90d":
+		return now.AddDate(0, 0, -90)
+	default: // week
+		weekday := int(now.Weekday())
+		if weekday == 0 {
+			weekday = 7
+		}
+		return time.Date(now.Year(), now.Month(), now.Day()-weekday+1, 0, 0, 0, 0, now.Location())
+	}
 }
 
 // --- AI Config Handlers ---

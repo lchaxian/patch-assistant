@@ -106,18 +106,19 @@ func BuildPatchSummary(mails []model.MailItem, timeRange string) *model.PatchSum
 	return resp
 }
 
-// ParseAndSaveNewPatchMails 增量解析未入库的 Patch 邮件标题并保存
-func ParseAndSaveNewPatchMails(accountID int64) {
+// ParseAndSaveNewPatchMails 增量解析未入库的 Patch 邮件标题并保存，返回新解析的 Patch 数量
+func ParseAndSaveNewPatchMails(accountID int64) int {
 	mails, err := db.GetUnparsedPatchMails(accountID)
 	if err != nil {
 		log.Printf("[Patch] 获取未解析邮件失败: %v", err)
-		return
+		return 0
 	}
 	if len(mails) == 0 {
-		return
+		return 0
 	}
 	count := db.ParseAndSavePatchInfos(mails, ParsePatchSubject)
 	if count > 0 {
 		log.Printf("[Patch] 新解析 %d 封 Patch 邮件", count)
 	}
+	return count
 }
