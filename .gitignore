@@ -30,3 +30,6 @@ Thumbs.db
 # 测试二进制
 /jira-mcp
 /wiki_test
+
+# Codegraph
+.codegraph/
