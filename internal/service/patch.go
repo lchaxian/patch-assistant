@@ -1,6 +1,7 @@
 package service
 
 import (
+	"fmt"
 	"log"
 	"regexp"
 	"strings"
@@ -121,4 +122,54 @@ func ParseAndSaveNewPatchMails(accountID int64) int {
 		log.Printf("[Patch] 新解析 %d 封 Patch 邮件", count)
 	}
 	return count
+}
+
+// SearchPatches 搜索 Patch：先查本地，没结果则从 IMAP 服务器同步后重新搜索
+func SearchPatches(keyword string, accountID int64) (*model.PatchSearchResponse, error) {
+	keyword = strings.TrimSpace(keyword)
+	if keyword == "" {
+		return nil, fmt.Errorf("搜索关键词不能为空")
+	}
+
+	resp := &model.PatchSearchResponse{}
+
+	// 第一步：搜索本地数据库
+	patches, err := db.SearchPatches(accountID, keyword, 50)
+	if err != nil {
+		return nil, fmt.Errorf("搜索本地失败: %w", err)
+	}
+	resp.Patches = patches
+
+	if len(patches) > 0 {
+		return resp, nil
+	}
+
+	// 本地无结果且未指定账户，无法从服务器搜索
+	if accountID == 0 {
+		return resp, nil
+	}
+
+	// 第二步：按关键词在 IMAP 服务器搜索并拉取匹配的邮件
+	newMails, _, syncErr := SearchAndSyncFromServer(accountID, keyword)
+	if syncErr != nil {
+		resp.Synced = false
+		log.Printf("[Patch] 搜索补同步失败: %v", syncErr)
+		return resp, nil
+	}
+
+	if newMails > 0 {
+		resp.Synced = true
+		resp.NewMails = newMails
+		// 重新解析新同步的 Patch 邮件
+		resp.NewPatches = ParseAndSaveNewPatchMails(accountID)
+	}
+
+	// 第三步：重新搜索本地数据库
+	patches, err = db.SearchPatches(accountID, keyword, 50)
+	if err != nil {
+		return nil, fmt.Errorf("同步后搜索失败: %w", err)
+	}
+	resp.Patches = patches
+
+	return resp, nil
 }

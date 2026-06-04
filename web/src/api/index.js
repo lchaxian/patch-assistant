@@ -47,6 +47,10 @@ export const patchApi = {
     const query = new URLSearchParams(params).toString();
     return request(`/patches/imap-count${query ? '?' + query : ''}`);
   },
+  search: (keyword, accountId) => request('/patches/search', {
+    method: 'POST',
+    body: JSON.stringify({ keyword, account_id: accountId }),
+  }),
 };
 
 // JIRA 配置

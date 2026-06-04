@@ -207,6 +207,105 @@ func CountPatchOnServer(accountID int64, sinceDate time.Time) (*PatchCountResult
 	return result, nil
 }
 
+// SearchAndSyncFromServer 按关键词在 IMAP 服务器搜索邮件并同步到本地
+// 与全量同步不同，只搜索并拉取标题包含关键词的邮件
+func SearchAndSyncFromServer(accountID int64, keyword string) (int, int, error) {
+	acc, err := db.GetAccount(accountID)
+	if err != nil {
+		return 0, 0, fmt.Errorf("获取账户信息失败: %w", err)
+	}
+
+	password, err := db.GetAccountPassword(accountID)
+	if err != nil {
+		return 0, 0, fmt.Errorf("获取密码失败: %w", err)
+	}
+
+	addr := fmt.Sprintf("%s:%d", acc.IMAPHost, acc.IMAPPort)
+	var c *client.Client
+	if acc.UseTLS {
+		c, err = client.DialTLS(addr, nil)
+	} else {
+		c, err = client.Dial(addr)
+	}
+	if err != nil {
+		return 0, 0, fmt.Errorf("连接服务器失败: %w", err)
+	}
+	defer c.Logout()
+
+	if err := c.Login(acc.Email, password); err != nil {
+		return 0, 0, fmt.Errorf("登录失败: %w", err)
+	}
+
+	mbox, err := c.Select("INBOX", false)
+	if err != nil {
+		return 0, 0, fmt.Errorf("选择 INBOX 失败: %w", err)
+	}
+
+	if mbox.Messages == 0 {
+		return 0, 0, nil
+	}
+
+	// 策略：IMAP 服务端组合 FROM + SUBJECT 搜索，让服务器做过滤
+	// FROM 用配置的来源邮箱，SUBJECT 用精确关键词
+	// 多个 FROM 用 OR 组合：OR(FROM "a" SUBJECT "kw", FROM "b" SUBJECT "kw")
+	sourceEmails := getPatchSourceEmails()
+
+	var criteria *imap.SearchCriteria
+	if len(sourceEmails) > 0 {
+		// 每个来源邮箱创建一个 FROM + SUBJECT 条件，用 OR 组合
+		var allFromCriteria []*imap.SearchCriteria
+		for _, email := range sourceEmails {
+			c := imap.NewSearchCriteria()
+			c.Header = textproto.MIMEHeader{
+				"From":    {email},
+				"Subject": {keyword},
+			}
+			allFromCriteria = append(allFromCriteria, c)
+		}
+		if len(allFromCriteria) == 1 {
+			criteria = allFromCriteria[0]
+		} else {
+			// 用 OR 把多个 FROM 条件组合
+			criteria = allFromCriteria[0]
+			for i := 1; i < len(allFromCriteria); i++ {
+				combined := imap.NewSearchCriteria()
+				combined.Or = [][2]*imap.SearchCriteria{{criteria, allFromCriteria[i]}}
+				criteria = combined
+			}
+		}
+	} else {
+		// 无来源邮箱配置，只按 SUBJECT 搜索
+		criteria = imap.NewSearchCriteria()
+		criteria.Header = textproto.MIMEHeader{"Subject": {keyword}}
+	}
+
+	uids, err := c.UidSearch(criteria)
+	if err != nil {
+		log.Printf("[IMAP] 组合搜索 FROM+SUBJECT '%s' 失败: %v", keyword, err)
+		return 0, 0, nil
+	}
+
+	if len(uids) == 0 {
+		log.Printf("[IMAP] FROM+SUBJECT '%s' 无匹配邮件", keyword)
+		return 0, 0, nil
+	}
+
+	log.Printf("[IMAP] FROM+SUBJECT '%s' 搜索到 %d 封邮件", keyword, len(uids))
+
+	// 客户端再按关键词精确过滤（防止 IMAP 服务器分词匹配）
+	matchedUids := filterByKeyword(c, uids, keyword)
+	if len(matchedUids) == 0 {
+		log.Printf("[IMAP] 关键词 '%s' 客户端过滤后无匹配邮件", keyword)
+		return 0, 0, nil
+	}
+
+	log.Printf("[IMAP] 关键词 '%s' 最终匹配 %d 封邮件", keyword, len(matchedUids))
+
+	// 使用两阶段同步拉取匹配的邮件
+	newMails, syncErr := twoPhaseSync(c, accountID, "INBOX", matchedUids)
+	return newMails, len(matchedUids), syncErr
+}
+
 // countSyncedMails 统计本地 mails 表中已同步的邮件数（按来源或时间范围）
 func countSyncedMails(accountID int64, sinceDate time.Time) int {
 	sourceEmails := getPatchSourceEmails()
@@ -325,6 +424,43 @@ func filterBySourceEmails(c *client.Client, uids []uint32, sourceEmails []string
 					filtered = append(filtered, msg.Uid)
 					break
 				}
+			}
+		}
+	}
+	return filtered
+}
+
+// filterByKeyword 客户端过滤：只保留 Subject 包含关键词的邮件 UID
+func filterByKeyword(c *client.Client, uids []uint32, keyword string) []uint32 {
+	if len(uids) == 0 {
+		return nil
+	}
+	keywordLower := strings.ToLower(keyword)
+	var filtered []uint32
+	batchSize := 200
+	for i := 0; i < len(uids); i += batchSize {
+		end := i + batchSize
+		if end > len(uids) {
+			end = len(uids)
+		}
+		batch := uids[i:end]
+
+		uidSet := new(imap.SeqSet)
+		for _, uid := range batch {
+			uidSet.AddNum(uid)
+		}
+
+		messages := make(chan *imap.Message, 20)
+		go func() {
+			_ = c.UidFetch(uidSet, []imap.FetchItem{imap.FetchEnvelope, imap.FetchUid}, messages)
+		}()
+
+		for msg := range messages {
+			if msg.Envelope == nil {
+				continue
+			}
+			if strings.Contains(strings.ToLower(msg.Envelope.Subject), keywordLower) {
+				filtered = append(filtered, msg.Uid)
 			}
 		}
 	}

@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { patchApi, accountApi, mailApi, aiApi } from '../api'
-import { FileText, RefreshCw, Filter, ChevronDown, ChevronRight, Package, Tag, Calendar, X, ArrowLeft, Settings, Sparkles, Trash2, Star, Plus, Edit3, Shield } from 'lucide-react'
+import { FileText, RefreshCw, Filter, ChevronDown, ChevronRight, Package, Tag, Calendar, X, ArrowLeft, Settings, Sparkles, Trash2, Star, Plus, Edit3, Shield, Search, Mail } from 'lucide-react'
 import dayjs from 'dayjs'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -39,6 +39,13 @@ export default function PatchSummary() {
   const [showAIPanel, setShowAIPanel] = useState(false)
   const [aiResult, setAiResult] = useState(null)
   const [aiLoading, setAiLoading] = useState(false)
+
+  // Patch 搜索相关状态
+  const [searchKeyword, setSearchKeyword] = useState('')
+  const [searchResults, setSearchResults] = useState(null)
+  const [searching, setSearching] = useState(false)
+  const [searchStep, setSearchStep] = useState('') // 搜索提示
+  const [searchError, setSearchError] = useState('')
 
   useEffect(() => { loadAccounts() }, [])
 
@@ -207,6 +214,38 @@ export default function PatchSummary() {
   const handleCloseDetail = () => { setSelectedPatch(null); setMailDetail(null) }
   const handleCloseAIPanel = () => { setShowAIPanel(false) }
 
+  // Patch 搜索
+  async function handleSearch() {
+    const kw = searchKeyword.trim()
+    if (!kw || searching) return
+    setSearching(true)
+    setSearchResults(null)
+    setSearchStep('')
+    setSearchError('')
+    try {
+      const res = await patchApi.search(kw, selectedAccount || 0)
+      const data = res.data
+      setSearchResults(data.patches || [])
+      if ((data.patches || []).length === 0) {
+        setSearchStep('未找到匹配的 Patch')
+      } else {
+        setSearchStep('')
+      }
+    } catch (err) {
+      setSearchError(err.message || '搜索失败')
+      setSearchStep('')
+    } finally {
+      setSearching(false)
+    }
+  }
+
+  function clearSearch() {
+    setSearchKeyword('')
+    setSearchResults(null)
+    setSearchStep('')
+    setSearchError('')
+  }
+
   const handleAISummarize = async (patch, force = false) => {
     // 已有缓存且非强制刷新，直接展示
     if (!force) {
@@ -327,8 +366,47 @@ export default function PatchSummary() {
         </div>
       </div>
 
+      {/* Patch 搜索栏 */}
+      <div className="card" style={{ marginBottom: 16, padding: '12px 16px' }}>
+        <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
+          <Search size={16} color="var(--primary)" style={{ flexShrink: 0 }} />
+          <input
+            type="text"
+            placeholder="输入 WARP 编号、Patch 编号或关键词搜索...（本地未找到自动从服务器同步）"
+            value={searchKeyword}
+            onChange={e => setSearchKeyword(e.target.value)}
+            onKeyDown={e => e.key === 'Enter' && handleSearch()}
+            style={{ flex: 1, minWidth: 200, padding: '8px 12px', border: '1px solid var(--border)', borderRadius: 'var(--radius)', fontSize: 14, outline: 'none' }}
+          />
+          <button onClick={handleSearch} disabled={searching} className="btn btn-primary btn-sm" style={{ flexShrink: 0 }}>
+            {searching ? (
+              <><div className="loading-spinner" style={{ width: 14, height: 14, borderWidth: 2, display: 'inline-block', verticalAlign: 'middle', marginRight: 4 }} /> 搜索中...</>
+            ) : '搜索'}
+          </button>
+          {searchResults && (
+            <button onClick={clearSearch} className="btn btn-secondary btn-sm" style={{ flexShrink: 0 }}>清除</button>
+          )}
+        </div>
+        {searchStep && !searching && (
+          <div style={{ marginTop: 8, padding: '6px 12px', background: '#EFF6FF', border: '1px solid #BFDBFE', borderRadius: 'var(--radius)', fontSize: 12, color: '#2563EB' }}>
+            {searchStep}
+          </div>
+        )}
+        {searching && searchStep && (
+          <div style={{ marginTop: 8, padding: '6px 12px', background: '#EFF6FF', border: '1px solid #BFDBFE', borderRadius: 'var(--radius)', fontSize: 12, color: '#2563EB', display: 'flex', alignItems: 'center', gap: 6 }}>
+            <div className="loading-spinner" style={{ width: 12, height: 12, borderWidth: 2, display: 'inline-block' }} />
+            {searchStep}
+          </div>
+        )}
+        {searchError && (
+          <div style={{ marginTop: 8, padding: '6px 12px', background: '#FEF2F2', border: '1px solid #FECACA', borderRadius: 'var(--radius)', fontSize: 12, color: '#DC2626' }}>
+            {searchError}
+          </div>
+        )}
+      </div>
+
       {/* 数据概览 - 简洁版 */}
-      {patches && !loading && !syncing && (
+      {!searchResults && patches && !loading && !syncing && (
         <div style={{ marginBottom: 16, fontSize: 13, color: 'var(--text-secondary)', display: 'flex', alignItems: 'center', gap: 8 }}>
           <span>当前范围共 <b style={{ color: 'var(--text)' }}>{patches.total_count}</b> 条 Patch</span>
           {accounts.length > 0 && accounts.some(a => a.last_sync_at) && (
@@ -392,13 +470,76 @@ export default function PatchSummary() {
         </div>
       )}
 
-      {error && (
+      {!searchResults && error && (
         <div className="card" style={{ borderColor: '#FCA5A5', background: '#FEF2F2' }}>
           <p style={{ color: '#DC2626', fontSize: 14 }}>{error}</p>
         </div>
       )}
 
-      {!loading && !error && patches && (
+      {/* 搜索结果展示 */}
+      {searchResults && (
+        <div style={{ marginBottom: 16 }}>
+          <div style={{ marginBottom: 12, fontSize: 13, color: 'var(--text-secondary)', display: 'flex', alignItems: 'center', gap: 8 }}>
+            <Search size={14} />
+            搜索 "<b style={{ color: 'var(--text)' }}>{searchKeyword}</b>" 找到 <b style={{ color: 'var(--text)' }}>{searchResults.length}</b> 条 Patch
+          </div>
+          {searchResults.length > 0 ? (
+            <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
+              <div className="table-wrapper">
+                <table style={{ tableLayout: 'fixed', width: '100%' }}>
+                  <colgroup>
+                    <col style={{ width: 70 }} />
+                    <col style={{ width: 260 }} />
+                    <col style={{ width: 120 }} />
+                    <col style={{ width: 100 }} />
+                    <col style={{ width: 130 }} />
+                    <col style={{ width: 220 }} />
+                  </colgroup>
+                  <thead>
+                    <tr><th>类型</th><th>Patch 名称</th><th>产品</th><th>版本</th><th>Patch 日期</th><th>操作</th></tr>
+                  </thead>
+                  <tbody>
+                    {searchResults.map((p, idx) => {
+                      const tc = typeColorMap[p.type] || typeColorMap['通用']
+                      const patchName = p.product && p.version && p.patch_date
+                        ? `Patch-${p.product}-${p.version}-${p.patch_date}`
+                        : (p.subject || '-')
+                      return (
+                        <tr key={p.mail_id || idx}>
+                          <td><span style={{ display: 'inline-flex', alignItems: 'center', padding: '2px 8px', borderRadius: 9999, fontSize: 12, fontWeight: 500, background: tc.bg, color: tc.text, border: `1px solid ${tc.border}` }}>{p.type || '通用'}</span></td>
+                          <td style={{ fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={patchName}>{patchName}</td>
+                          <td style={{ fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.product || '-'}</td>
+                          <td style={{ fontFamily: 'monospace', fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.version || '-'}</td>
+                          <td style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.patch_date ? (<span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><Calendar size={12} />{p.patch_date.slice(0, 4)}-{p.patch_date.slice(4, 6)}-{p.patch_date.slice(6, 8)}</span>) : '-'}</td>
+                          <td style={{ whiteSpace: 'nowrap' }}>
+                            <div style={{ display: 'flex', gap: 6 }}>
+                              <ActionBtn label="详情" color="var(--primary)" onClick={() => handleViewDetail(p)} />
+                              <ActionBtn
+                                label="AI 分析"
+                                color="#8B5CF6"
+                                icon={<Sparkles size={12} />}
+                                onClick={() => handleAISummarize(p)}
+                              />
+                            </div>
+                          </td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          ) : (
+            <div className="card" style={{ padding: 32, textAlign: 'center', color: 'var(--text-muted)' }}>
+              <Mail size={36} style={{ marginBottom: 8 }} />
+              <p>未找到匹配的 Patch</p>
+              <p style={{ fontSize: 12 }}>请确认关键词是否正确，或尝试从邮件服务器同步</p>
+            </div>
+          )}
+        </div>
+      )}
+
+      {!searchResults && !loading && !error && patches && (
         <>
           <div className="stats-grid">
             <div className="stat-card">

@@ -499,6 +499,34 @@ func calcSinceDate(timeRange string) time.Time {
 	}
 }
 
+// SearchPatch 搜索本地 Patch 数据库
+func SearchPatch(c *gin.Context) {
+	var req struct {
+		Keyword   string `json:"keyword"`
+		AccountID int64  `json:"account_id"`
+	}
+	if err := c.BindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "无效的请求参数"})
+		return
+	}
+
+	keyword := strings.TrimSpace(req.Keyword)
+	if keyword == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "搜索关键词不能为空"})
+		return
+	}
+
+	patches, err := db.SearchPatches(req.AccountID, keyword, 50)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "搜索失败: " + err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"data": model.PatchSearchResponse{
+		Patches: patches,
+	}})
+}
+
 // --- AI Config Handlers ---
 
 func ListAIConfigs(c *gin.Context) {

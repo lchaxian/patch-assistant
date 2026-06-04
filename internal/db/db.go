@@ -791,6 +791,46 @@ func GetPatchInfoByMailID(mailID int64) (*model.PatchInfo, error) {
 	return &info, nil
 }
 
+// SearchPatches 按关键词搜索本地已同步的 Patch
+func SearchPatches(accountID int64, keyword string, limit int) ([]model.PatchInfo, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	pattern := "%" + keyword + "%"
+	query := `
+		SELECT p.mail_id, p.account_id, p.subject, p.patch_type, p.product, p.version, p.patch_date, p.seq,
+		       m.from_name, m.from_addr, m.mail_date
+		FROM patch_infos p
+		JOIN mails m ON p.mail_id = m.id
+		WHERE (p.subject LIKE ? OR p.product LIKE ? OR p.version LIKE ? OR p.patch_date LIKE ?)
+	`
+	args := []interface{}{pattern, pattern, pattern, pattern}
+	if accountID > 0 {
+		query += ` AND p.account_id = ?`
+		args = append(args, accountID)
+	}
+	query += ` ORDER BY m.mail_date DESC LIMIT ?`
+	args = append(args, limit)
+
+	rows, err := DB.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var patches []model.PatchInfo
+	for rows.Next() {
+		var info model.PatchInfo
+		if err := rows.Scan(&info.MailID, &info.AccountID, &info.Subject, &info.Type,
+			&info.Product, &info.Version, &info.Date, &info.Seq,
+			&info.FromName, &info.FromAddr, &info.MailDate); err != nil {
+			return nil, err
+		}
+		patches = append(patches, info)
+	}
+	return patches, rows.Err()
+}
+
 // --- AI Config operations ---
 
 // SaveAIConfig 保存或更新 AI 配置

@@ -110,6 +110,7 @@ func main() {
 		api.GET("/patches/summary", handler.GetPatchSummary)
 		api.GET("/patches/sync-status", handler.GetPatchSyncStatus)
 		api.GET("/patches/imap-count", handler.GetPatchIMAPCount)
+		api.POST("/patches/search", handler.SearchPatch)
 
 		patchSrc := api.Group("/patch-sources")
 		{

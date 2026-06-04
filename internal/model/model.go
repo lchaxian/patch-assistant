@@ -95,6 +95,14 @@ type PatchSummaryResponse struct {
 	SyncResults []SyncResult  `json:"sync_results,omitempty"`
 }
 
+// PatchSearchResponse Patch 搜索结果响应
+type PatchSearchResponse struct {
+	Patches    []PatchInfo `json:"patches"`
+	Synced     bool        `json:"synced"`      // 是否从服务器同步了新数据
+	NewMails   int         `json:"new_mails"`   // 同步到的新邮件数
+	NewPatches int         `json:"new_patches"` // 新解析的 Patch 数
+}
+
 // AIConfig AI 服务配置
 type AIConfig struct {
 	ID        int64     `json:"id"`
